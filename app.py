@@ -1234,6 +1234,7 @@ elif page == "🏔️ Y9 Journey Groups":
 
     # ── Session State ─────────────────────────────────────────────────────────────────────
     for _k, _v in [('y9_sep', []), ('y9_must', []), ('y9_force', {}),
+                   ('y9_force_week', {}),
                    ('y9_na', []), ('y9_seed', 0), ('y9_results', {}), ('y9_states', {})]:
         if _k not in st.session_state:
             st.session_state[_k] = _v
@@ -1370,9 +1371,10 @@ elif page == "🏔️ Y9 Journey Groups":
             if st.session_state.get('y9_last_loaded') != _y9_json_upload.file_id:
                 try:
                     _loaded = json.load(_y9_json_upload)
-                    st.session_state.y9_sep   = [tuple(x) for x in _loaded.get('sep',   [])]
-                    st.session_state.y9_must  = [tuple(x) for x in _loaded.get('must',  [])]
-                    st.session_state.y9_force = _loaded.get('force', {})
+                    st.session_state.y9_sep        = [tuple(x) for x in _loaded.get('sep',   [])]
+                    st.session_state.y9_must       = [tuple(x) for x in _loaded.get('must',  [])]
+                    st.session_state.y9_force      = _loaded.get('force', {})
+                    st.session_state.y9_force_week = _loaded.get('force_week', {})
                     _l_na = [s for s in _loaded.get('na', []) if s in all_y9]
                     st.session_state.y9_na = _l_na
                     if 'weights' in _loaded:
@@ -1414,6 +1416,28 @@ elif page == "🏔️ Y9 Journey Groups":
                     del st.session_state.y9_force[_s]; st.rerun()
             if st.sidebar.button("Clear Force Rules", key="y9_clr_force"):
                 st.session_state.y9_force = {}; st.rerun()
+
+        # Force week (opposite-week override)
+        st.sidebar.header("🔀 Y9: Force to Opposite Week")
+        st.sidebar.caption("Use this when a student must go in the opposite week to their house. E.g. a Unwin/Hodgkin student going with Mather/Ransome.")
+        _y9_fw_s = st.sidebar.selectbox("Student", [""] + attending_y9, key="y9_fwk_s")
+        _y9_fw_w = st.sidebar.selectbox("Send to Week", ["", 1, 2],
+            format_func=lambda w: "-- select --" if w == "" else (
+                "Week 1 (Unwin & Hodgkin)" if w == 1 else "Week 2 (Mather & Ransome)"),
+            key="y9_fwk_w")
+        if st.sidebar.button("Add Force Week Rule", key="y9_add_fwk"):
+            if _y9_fw_s and _y9_fw_w != "":
+                st.session_state.y9_force_week[_y9_fw_s] = int(_y9_fw_w); st.rerun()
+        if st.session_state.y9_force_week:
+            st.sidebar.write("**Active Force Week Rules:**")
+            for _s, _w in list(st.session_state.y9_force_week.items()):
+                _c1, _c2 = st.sidebar.columns([5, 1])
+                _wlbl = "Wk 1" if _w == 1 else "Wk 2"
+                _c1.write(f"- {_s} ➡️ {_wlbl}")
+                if _c2.button("❌", key=f"y9_dfw_{_s}"):
+                    del st.session_state.y9_force_week[_s]; st.rerun()
+            if st.sidebar.button("Clear Force Week Rules", key="y9_clr_fwk"):
+                st.session_state.y9_force_week = {}; st.rerun()
 
         # Must go with
         st.sidebar.header("🤝 Y9: Must Go With")
@@ -1472,11 +1496,12 @@ elif page == "🏔️ Y9 Journey Groups":
         # ── Save Your Setup ───────────────────────────────────────────────────────────────
         st.sidebar.header("💾 Save Your Setup")
         _y9_save = {
-            'sep':     [list(p) for p in st.session_state.y9_sep],
-            'must':    [list(p) for p in st.session_state.y9_must],
-            'force':   st.session_state.y9_force,
-            'na':      st.session_state.y9_na,
-            'weights': st.session_state.y9_weights,
+            'sep':        [list(p) for p in st.session_state.y9_sep],
+            'must':       [list(p) for p in st.session_state.y9_must],
+            'force':      st.session_state.y9_force,
+            'force_week': st.session_state.y9_force_week,
+            'na':         st.session_state.y9_na,
+            'weights':    st.session_state.y9_weights,
         }
         st.sidebar.download_button(
             label="📥 Download Y9 Rules & Weights (JSON)",
@@ -1505,14 +1530,24 @@ elif page == "🏔️ Y9 Journey Groups":
         st.markdown("---")
 
         # ── WEEK SUMMARY ──────────────────────────────────────────────────────────────────
-        _w1_n = len(df_y9_act[df_y9_act['Week'] == 1])
-        _w2_n = len(df_y9_act[df_y9_act['Week'] == 2])
-        _wX_n = len(df_y9_act[df_y9_act['Week'].isna()])
-        _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+        _force_week_rules = st.session_state.get('y9_force_week', {})
+        # Compute effective week counts after force-week overrides
+        def _effective_week(row):
+            nm = row['Official Name']
+            if nm in _force_week_rules:
+                return _force_week_rules[nm]
+            return row['Week']
+        df_y9_act['_eff_week'] = df_y9_act.apply(_effective_week, axis=1)
+        _w1_n = len(df_y9_act[df_y9_act['_eff_week'] == 1])
+        _w2_n = len(df_y9_act[df_y9_act['_eff_week'] == 2])
+        _wX_n = len(df_y9_act[df_y9_act['_eff_week'].isna()])
+        _fw_n = len([s for s in _force_week_rules if s in attending_y9])
+        _mc1, _mc2, _mc3, _mc4, _mc5 = st.columns(5)
         _mc1.metric("Total Y9", len(df_y9_act))
         _mc2.metric("Week 1 (Unwin + Hodgkin)", _w1_n)
         _mc3.metric("Week 2 (Mather + Ransome)", _w2_n)
         _mc4.metric("⚠️ No Week Assigned", _wX_n)
+        _mc5.metric("🔀 Force-Week Overrides", _fw_n)
         if _wX_n:
             with st.expander("⚠️ Students with no house/week assigned — check their data"):
                 _unassigned = df_y9_act[df_y9_act['Week'].isna()][['Student ID', 'Official Name', 'Responded']]
@@ -1520,31 +1555,54 @@ elif page == "🏔️ Y9 Journey Groups":
 
         # ── ALGORITHM HELPERS ─────────────────────────────────────────────────────────────
 
-        def _determine_config(n_students, pref_data_dict):
-            """Return {camp_key: n_instances} for a given week."""
-            fixed_cap = 13 + 24 + 24  # MTB(1×13) + CC(2×12) + MM(2×12)
-            exp_d = sum(1 for p in pref_data_dict.values() if p.get('Explorer', 5) <= 2)
+        def _determine_config(n_students, pref_data_dict, week_num):
+            """Return {camp_key: n_instances} obeying per-week camp count limits.
+
+            Rules (same for both weeks unless noted):
+              • MTB:  exactly 1
+              • CC:   1 or 2
+              • MM:   1 or 2
+              • Cradle (Explorer + Challenger combined): exactly 2 instances total
+                  — could be 2×Explorer, 2×Challenger, or 1 of each
+              • Week 1 total: ≤ 7 camps   Week 2 total: ≤ 6 camps
+            """
+            MAX_CAMPS = {1: 7, 2: 6}.get(week_num, 7)
+
+            # Count demand for each cradle type
+            exp_d = sum(1 for p in pref_data_dict.values() if p.get('Explorer',   5) <= 2)
             cha_d = sum(1 for p in pref_data_dict.values() if p.get('Challenger', 5) <= 2)
-            config = {'MTB': 1, 'CC': 2, 'MM': 2}
 
-            # How many students still need a Cradle camp slot
-            remaining = n_students - fixed_cap
-
+            # Cradle split: always 2 instances total; split by demand
             if exp_d >= cha_d:
-                primary, secondary = 'Explorer', 'Challenger'
-                primary_cap, secondary_cap = 16, 10
+                if exp_d == 0 and cha_d == 0:
+                    cradle_config = {'Explorer': 1, 'Challenger': 1}   # no preference data — split evenly
+                elif cha_d == 0:
+                    cradle_config = {'Explorer': 2}
+                else:
+                    cradle_config = {'Explorer': 1, 'Challenger': 1}
             else:
-                primary, secondary = 'Challenger', 'Explorer'
-                primary_cap, secondary_cap = 10, 16
+                if exp_d == 0:
+                    cradle_config = {'Challenger': 2}
+                else:
+                    cradle_config = {'Explorer': 1, 'Challenger': 1}
 
-            if remaining <= primary_cap:
-                config[primary] = 1                          # 6 camps
-            elif remaining <= primary_cap * 2:
-                config[primary] = 2                          # 7 camps, same type ×2
-            elif remaining <= primary_cap + secondary_cap:
-                config[primary] = 1; config[secondary] = 1  # 7 camps, both types
-            else:
-                config[primary] = 2                          # fallback: force ×2
+            # Start with the fixed minimum: MTB×1, CC×1, MM×1, plus cradle
+            config = {'MTB': 1, 'CC': 1, 'MM': 1, **cradle_config}
+            total = sum(config.values())   # 4 or 5 depending on cradle split
+
+            # Count demand for CC and MM to decide whether to run a second instance
+            cc_d = sum(1 for p in pref_data_dict.values() if p.get('CC', 5) <= 2)
+            mm_d = sum(1 for p in pref_data_dict.values() if p.get('MM', 5) <= 2)
+
+            # Add a second MM first (if demand warrants and we have room)
+            if total < MAX_CAMPS and mm_d >= cc_d:
+                config['MM'] = 2; total += 1
+            # Add a second CC (if room)
+            if total < MAX_CAMPS:
+                config['CC'] = 2; total += 1
+            # If MM wasn't doubled yet, try again
+            if total < MAX_CAMPS and config.get('MM', 1) == 1:
+                config['MM'] = 2; total += 1
 
             return config
 
@@ -1675,6 +1733,24 @@ elif page == "🏔️ Y9 Journey Groups":
 
         for _wk, _wk_label in [(1, "Week 1 (Unwin & Hodgkin)"), (2, "Week 2 (Mather & Ransome)")]:
             _wdf = df_y9_act[df_y9_act['Week'] == _wk].copy()
+
+            # Apply force-week overrides: students whose home week differs from _wk
+            # but have been explicitly forced into this week are added here;
+            # students forced out of this week are dropped.
+            _force_week_rules = st.session_state.get('y9_force_week', {})
+            _forced_into_wk   = [s for s, w in _force_week_rules.items() if w == _wk and s in attending_y9]
+            _forced_out_of_wk = [s for s, w in _force_week_rules.items() if w != _wk and s in attending_y9]
+
+            # Add forced-in students (may come from the other week's natural cohort)
+            for _fi in _forced_into_wk:
+                if _fi not in _wdf['Official Name'].values:
+                    _fi_row = df_y9_act[df_y9_act['Official Name'] == _fi]
+                    if not _fi_row.empty:
+                        _wdf = pd.concat([_wdf, _fi_row], ignore_index=True)
+
+            # Remove forced-out students
+            _wdf = _wdf[~_wdf['Official Name'].isin(_forced_out_of_wk)]
+
             if _wdf.empty:
                 all_week_results[_wk] = {}; all_week_configs[_wk] = {}; continue
 
@@ -1696,7 +1772,7 @@ elif page == "🏔️ Y9 Journey Groups":
             all_friend_reqs.update(_wfr)
 
             _pref_dict = dict(zip(_wdf['Official Name'], _wdf['Camp Prefs']))
-            _config = _determine_config(len(_wdf), _pref_dict)
+            _config = _determine_config(len(_wdf), _pref_dict, _wk)
             _caps   = _get_caps(_config)
             all_week_configs[_wk] = _config
 
@@ -1707,6 +1783,7 @@ elif page == "🏔️ Y9 Journey Groups":
             _state_key = str({
                 'config': _config, 'na': sorted(_y9_na),
                 'force': sorted(_forced_wk.items()),
+                'force_week': sorted(_force_week_rules.items()),
                 'sep':   sorted([tuple(sorted(p)) for p in _sep_wk]),
                 'must':  sorted([tuple(sorted(p)) for p in _must_wk]),
                 'seed': st.session_state.y9_seed, 'depth': y9_depth, 'n': len(_wdf)
