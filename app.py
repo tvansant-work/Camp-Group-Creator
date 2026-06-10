@@ -273,6 +273,8 @@ if page == "🏕️ Y8 Group Creator":
         # --- 4. OPTIMIZATION ALGORITHM PER CLASS ---
         classes = sorted(df_merged['Which Connections class are you in? '].dropna().unique().tolist())
         styled_class_dfs = {}
+        raw_class_dfs = {}
+        class_friend_requests = {}
         leader_overview_data = []
         isolated_students = []
 
@@ -359,6 +361,7 @@ if page == "🏕️ Y8 Group Creator":
                     G.add_edge(student, f_name)
 
             students = sorted(list(G.nodes))
+            class_friend_requests[cls] = {k: list(v) for k, v in friend_requests.items()}
 
             if cls in st.session_state.optimized_groups:
                 freycinet_group, bof_group = st.session_state.optimized_groups[cls]
@@ -618,6 +621,7 @@ if page == "🏕️ Y8 Group Creator":
 
             styled_df = df_class_final.style.apply(highlight_cells, df_reference=df_class_final, fr_dict=friend_requests, axis=1)
             styled_class_dfs[cls] = styled_df
+            raw_class_dfs[cls] = df_class_final.copy()
 
             st.subheader(f"Class: {cls}")
             f_males = sum(1 for s in freycinet_group if G.nodes[s]['gender'] == 'm')
@@ -669,19 +673,151 @@ if page == "🏕️ Y8 Group Creator":
 
         styled_leaders = df_leaders.style.apply(highlight_leader_overview, df_ref=df_leaders, axis=1)
 
+        # ─── Excel colour helpers ─────────────────────────────────────────────────────
+        def _apply_y8_excel_colors(ws, df_data, fr_map, sep_pairs, find_name):
+            """Apply highlight colours matching the on-screen display to a Y8 class sheet."""
+            fill_grey       = PatternFill("solid", fgColor="D9D9D9")
+            fill_green      = PatternFill("solid", fgColor="85E085")
+            fill_yellow     = PatternFill("solid", fgColor="FFFFCC")
+            fill_red        = PatternFill("solid", fgColor="FF4D4D")
+            fill_pink       = PatternFill("solid", fgColor="FFCCCC")
+            fill_orange     = PatternFill("solid", fgColor="FF9900")
+            fill_amber      = PatternFill("solid", fgColor="FFCC00")
+            font_bold       = Font(bold=True)
+            font_bold_white = Font(bold=True, color="FFFFFF")
+            # Style header row
+            for col_idx in range(1, len(df_data.columns) + 1):
+                ws.cell(row=1, column=col_idx).fill = PatternFill("solid", fgColor="4472C4")
+                ws.cell(row=1, column=col_idx).font = Font(bold=True, color="FFFFFF")
+            cols = list(df_data.columns)
+            # Build student→camp lookup (skip separator rows)
+            student_to_camp_xl = {}
+            for _, row in df_data.iterrows():
+                if '---' not in str(row.get('Student', '')):
+                    student_to_camp_xl[row['Student']] = str(row.get('Assigned Camp', ''))
+            non_sep = df_data[~df_data['Student'].astype(str).str.contains('---', na=False)]
+            for excel_row, (_, row) in enumerate(df_data.iterrows(), start=2):
+                student  = str(row.get('Student', ''))
+                assigned = str(row.get('Assigned Camp', ''))
+                # Separator rows — full grey
+                if '---' in student:
+                    for c in range(1, len(cols) + 1):
+                        ws.cell(row=excel_row, column=c).fill = fill_grey
+                        ws.cell(row=excel_row, column=c).font = font_bold
+                    continue
+                # Searched-for student — full green, highest priority
+                if find_name and student == find_name:
+                    for c in range(1, len(cols) + 1):
+                        ws.cell(row=excel_row, column=c).fill = fill_green
+                        ws.cell(row=excel_row, column=c).font = font_bold
+                    continue
+                # Responded column — yellow if no response
+                if row.get('Responded') == 'No' and 'Responded' in cols:
+                    ws.cell(row=excel_row, column=cols.index('Responded') + 1).fill = fill_yellow
+                # Activity veto (score 1 in a forced activity) — red
+                for act_col, veto_camp in [('Sea Kayak', 'Freycinet'), ('Coasteer', 'Freycinet'),
+                                            ('MTB', 'Bay of Fires'), ('Snorkel', 'Bay of Fires')]:
+                    if act_col in cols:
+                        try:
+                            if float(row[act_col]) == 1.0 and assigned == veto_camp:
+                                c = ws.cell(row=excel_row, column=cols.index(act_col) + 1)
+                                c.fill = fill_red; c.font = font_bold_white
+                        except (ValueError, TypeError):
+                            pass
+                # Wrong camp preference — pink on Assigned Camp
+                if 'Preferred Camp' in cols and 'Assigned Camp' in cols:
+                    pref = str(row.get('Preferred Camp', ''))
+                    if pref not in ('Tie', 'No Response (Tie)') and pref and assigned != pref:
+                        ws.cell(row=excel_row, column=cols.index('Assigned Camp') + 1).fill = fill_pink
+                # Friend not in same camp — pink on friend column
+                for f_col in ('Friend 1', 'Friend 2'):
+                    if f_col in cols:
+                        f_name_val = str(row.get(f_col, ''))
+                        if f_name_val not in ('', 'nan', '---'):
+                            f_camp = student_to_camp_xl.get(f_name_val)
+                            if f_camp is not None and f_camp != assigned:
+                                ws.cell(row=excel_row, column=cols.index(f_col) + 1).fill = fill_pink
+                # Student column: isolation (0 friends) = orange; separation violation = red
+                if 'Student' in cols:
+                    reqs = fr_map.get(student, [])
+                    if reqs:
+                        friends_in_camp = sum(1 for f in reqs if student_to_camp_xl.get(f) == assigned)
+                        if friends_in_camp == 0:
+                            c = ws.cell(row=excel_row, column=cols.index('Student') + 1)
+                            c.fill = fill_orange; c.font = font_bold
+                    for s1, s2 in sep_pairs:
+                        if student == s1 and student_to_camp_xl.get(s2) == assigned:
+                            ws.cell(row=excel_row, column=cols.index('Student') + 1).fill = fill_red
+                        elif student == s2 and student_to_camp_xl.get(s1) == assigned:
+                            ws.cell(row=excel_row, column=cols.index('Student') + 1).fill = fill_red
+                # Gender balance — red if sole gender, amber if 2-3
+                if 'Gender' in cols:
+                    my_gen = str(row.get('Gender', ''))
+                    if my_gen in ('M', 'F'):
+                        g_count = int(((non_sep['Assigned Camp'] == assigned) & (non_sep['Gender'] == my_gen)).sum())
+                        gen_cell = ws.cell(row=excel_row, column=cols.index('Gender') + 1)
+                        if g_count == 1:
+                            gen_cell.fill = fill_red; gen_cell.font = font_bold_white
+                        elif 1 < g_count < 4:
+                            gen_cell.fill = fill_amber
+
+        def _apply_leader_excel_colors(ws, df_data):
+            """Apply skill-score colours to the Leader Overview sheet."""
+            fill_grey       = PatternFill("solid", fgColor="D9D9D9")
+            fill_dark_red   = PatternFill("solid", fgColor="A83232")
+            fill_orange     = PatternFill("solid", fgColor="FF9933")
+            fill_yellow     = PatternFill("solid", fgColor="FFCC00")
+            font_bold_white = Font(bold=True, color="FFFFFF")
+            font_bold       = Font(bold=True)
+            for col_idx in range(1, len(df_data.columns) + 1):
+                ws.cell(row=1, column=col_idx).fill = PatternFill("solid", fgColor="4472C4")
+                ws.cell(row=1, column=col_idx).font = Font(bold=True, color="FFFFFF")
+            cols = list(df_data.columns)
+            skill_cols = ['General Camping Skill', 'Sleeping Outdoors/Bugs', 'Swimming Confidence',
+                          'Bike Comfort', 'Overnight Hike', 'Reaction to Hardship',
+                          'Gear Independence', 'Group Teamwork', 'Sea Kayak', 'Coasteer',
+                          'MTB Interest', 'Snorkel']
+            for excel_row, (_, row) in enumerate(df_data.iterrows(), start=2):
+                if '---' in str(row.get('Student', '')):
+                    for c in range(1, len(cols) + 1):
+                        ws.cell(row=excel_row, column=c).fill = fill_grey
+                        ws.cell(row=excel_row, column=c).font = font_bold
+                    continue
+                for col_name in skill_cols:
+                    if col_name in cols:
+                        val = str(row.get(col_name, '')).strip()
+                        m = re.search(r'^\s*([1-5])(?:\D|$)', val)
+                        if m:
+                            num = int(m.group(1))
+                            cell = ws.cell(row=excel_row, column=cols.index(col_name) + 1)
+                            if num in (1, 2):
+                                cell.fill = fill_dark_red; cell.font = font_bold_white
+                            elif num in (3, 4):
+                                cell.fill = fill_orange; cell.font = font_bold
+                            elif num == 5:
+                                cell.fill = fill_yellow; cell.font = font_bold
+
         # --- 6. EXCEL EXPORT ---
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            for cls, styled_df in styled_class_dfs.items():
-                styled_df.to_excel(writer, sheet_name=str(cls)[:31], index=False)
-                worksheet = writer.sheets[str(cls)[:31]]
-                for col in worksheet.columns: worksheet.column_dimensions[col[0].column_letter].width = max((len(str(cell.value)) for cell in col), default=0) + 2
+            for cls, df_raw in raw_class_dfs.items():
+                sheet_name = str(cls)[:31]
+                df_raw.to_excel(writer, sheet_name=sheet_name, index=False)
+                ws = writer.sheets[sheet_name]
+                _apply_y8_excel_colors(ws, df_raw, class_friend_requests.get(cls, {}),
+                                       st.session_state.separation_pairs, student_to_find)
+                for col in ws.columns:
+                    ws.column_dimensions[col[0].column_letter].width = max(
+                        (len(str(cell.value or '')) for cell in col), default=0) + 2
 
             # LEADER OVERVIEW
-            styled_leaders.to_excel(writer, sheet_name="Leader Overview", index=False)
-            worksheet_l = writer.sheets["Leader Overview"]
-            for col in worksheet_l.columns: worksheet_l.column_dimensions[col[0].column_letter].width = min(max((len(str(cell.value)) for cell in col), default=0) + 2, 50) 
-            
+            df_leaders.to_excel(writer, sheet_name="Leader Overview", index=False)
+            ws_leaders = writer.sheets["Leader Overview"]
+            _apply_leader_excel_colors(ws_leaders, df_leaders)
+            for col in ws_leaders.columns:
+                ws_leaders.column_dimensions[col[0].column_letter].width = min(
+                    max((len(str(cell.value or '')) for cell in col), default=0) + 2, 50)
+
             # Add Not Attending Tab
             if not_attending_list:
                 na_data = df_merged_full[df_merged_full['Official Name'].isin(not_attending_list)]
@@ -1400,21 +1536,8 @@ elif page == "🏔️ Y9 Journey Groups":
             default=st.session_state.y9_na, key="y9_na_ms")
         st.session_state.y9_na = _y9_na
 
-        y9_include_drafts = st.sidebar.checkbox(
-            "✏️ Draft in students who haven't responded (shown in grey)",
-            value=st.session_state.y9_include_drafts, key="y9_drafts_cb")
-        st.session_state.y9_include_drafts = y9_include_drafts
-        if y9_include_drafts:
-            st.sidebar.caption("Non-responding students will be slotted into groups and shown with a grey background.")
-
         df_y9_act = df_y9[~df_y9['Official Name'].isin(_y9_na)].copy()
         attending_y9 = sorted(df_y9_act['Official Name'].dropna().unique().tolist())
-
-        # Optimisation pool: responders only (unless draft mode is on)
-        if y9_include_drafts:
-            df_y9_opt = df_y9_act.copy()
-        else:
-            df_y9_opt = df_y9_act[df_y9_act['Responded']].copy()
 
         # Force camp
         st.sidebar.header("📍 Y9: Force Camp")
@@ -1550,7 +1673,7 @@ elif page == "🏔️ Y9 Journey Groups":
 
         # ── MAIN CONTROLS ─────────────────────────────────────────────────────────────────
         st.markdown("---")
-        _col_find, _col_ctrl = st.columns([2, 1])
+        _col_find, _col_ctrl, _col_draft = st.columns([2, 1, 1])
         with _col_find:
             st.subheader("🔍 Find a Student")
             y9_find = st.selectbox("Search:", [""] + attending_y9, key="y9_find_s")
@@ -1561,9 +1684,28 @@ elif page == "🏔️ Y9 Journey Groups":
                 value="Standard (5-10s)", key="y9_depth")
             if st.button("🔄 Regenerate Y9 Groups", use_container_width=True, key="y9_regen"):
                 st.session_state.y9_seed += 1; st.rerun()
+        with _col_draft:
+            st.subheader("✏️ Draft Mode")
+            _n_no_resp = len(df_y9_act[~df_y9_act["Responded"]])
+            st.caption(f"{_n_no_resp} student(s) haven't responded yet.")
+            y9_include_drafts = st.checkbox(
+                "Draft in non-responders",
+                value=st.session_state.y9_include_drafts, key="y9_drafts_cb",
+                help="Places students who haven't filled in the survey into groups. "
+                     "They are prioritised alongside anyone who requested them, "
+                     "then slotted in to balance group sizes. Shown with a grey background.")
+            st.session_state.y9_include_drafts = y9_include_drafts
+            if y9_include_drafts:
+                st.caption("🔘 Non-responders will be placed and shown in grey.")
 
         y9_find_result = st.empty()
         st.markdown("---")
+
+        # Optimisation pool: built here after the draft checkbox is rendered
+        if y9_include_drafts:
+            df_y9_opt = df_y9_act.copy()
+        else:
+            df_y9_opt = df_y9_act[df_y9_act['Responded']].copy()
 
         # ── WEEK SUMMARY ──────────────────────────────────────────────────────────────────
         _force_week_rules = st.session_state.get('y9_force_week', {})
@@ -1827,6 +1969,7 @@ elif page == "🏔️ Y9 Journey Groups":
             _week_students = set(_wdf['Official Name'])
 
             # Build friend requests (only within same week + must/sep rules applied)
+            # First pass: build requests for all students who responded
             _wfr = {}
             for _, _row in _wdf.iterrows():
                 _st = _row['Official Name']
@@ -1839,10 +1982,30 @@ elif page == "🏔️ Y9 Journey Groups":
                     if _st == _a and _b in _fr: _fr.remove(_b)
                     if _st == _b and _a in _fr: _fr.remove(_a)
                 _wfr[_st] = _fr
+            # Second pass (draft mode): for non-responders, inject reverse requests so
+            # the optimiser knows who wants to be with them and places them together.
+            if y9_include_drafts:
+                _non_resp_in_week = set(
+                    r['Official Name'] for _, r in _wdf.iterrows() if not r['Responded']
+                )
+                for _draft_st in _non_resp_in_week:
+                    _reverse = [
+                        other for other, reqs in _wfr.items()
+                        if _draft_st in reqs and other != _draft_st
+                    ]
+                    # Also honour must-go-with rules for non-responders
+                    for _a, _b in st.session_state.y9_must:
+                        if _draft_st == _a and _b in _week_students and _b not in _reverse:
+                            _reverse.append(_b)
+                        if _draft_st == _b and _a in _week_students and _a not in _reverse:
+                            _reverse.append(_a)
+                    _wfr[_draft_st] = _reverse
             all_friend_reqs.update(_wfr)
 
+            # Use only responders' prefs for camp config sizing; non-responders just fill space
+            _resp_wdf = _wdf[_wdf['Responded']] if y9_include_drafts else _wdf
             _pref_dict = dict(zip(_wdf['Official Name'], _wdf['Camp Prefs']))
-            _config = _determine_config(len(_wdf), _pref_dict, _wk)
+            _config = _determine_config(len(_wdf), dict(zip(_resp_wdf['Official Name'], _resp_wdf['Camp Prefs'])), _wk)
             _caps   = _get_caps(_config)
             all_week_configs[_wk] = _config
 
