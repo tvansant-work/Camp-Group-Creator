@@ -2315,6 +2315,109 @@ elif page == "🏔️ Y9 Journey Groups":
                     st.info("No students marked as not attending.")
             if _export_sheets:
                 st.markdown("---")
+
+                def _apply_y9_excel_colors(ws, df_data, sheet_name, full_lk, sep_pairs, find_name, include_drafts):
+                    """Apply on-screen highlight colours to a Y9 camp group sheet."""
+                    # Parse sheet name to get camp key and week:  e.g. MTB_W1, CC_A_W2
+                    _parts = sheet_name.split('_')
+                    _ck_xl  = _parts[0]
+                    _wk_xl  = int(_parts[-1].replace('W', '')) if _parts[-1].startswith('W') else None
+
+                    fill_blue_hdr   = PatternFill("solid", fgColor="4472C4")
+                    fill_green      = PatternFill("solid", fgColor="85E085")
+                    fill_grey       = PatternFill("solid", fgColor="D9D9D9")
+                    fill_yellow     = PatternFill("solid", fgColor="FFFFCC")
+                    fill_pink       = PatternFill("solid", fgColor="FFCCCC")
+                    fill_orange     = PatternFill("solid", fgColor="FF9900")
+                    fill_red        = PatternFill("solid", fgColor="FF4D4D")
+                    fill_pref1      = PatternFill("solid", fgColor="C8F7C5")
+                    fill_pref2      = PatternFill("solid", fgColor="E8F8C5")
+                    fill_pref4      = PatternFill("solid", fgColor="FFD9A0")
+                    fill_pref5      = PatternFill("solid", fgColor="FFB3B3")
+                    fill_skill_red  = PatternFill("solid", fgColor="A83232")
+                    fill_skill_org  = PatternFill("solid", fgColor="FF9933")
+                    fill_skill_grn  = PatternFill("solid", fgColor="C8F7C5")
+                    font_bold       = Font(bold=True)
+                    font_bold_white = Font(bold=True, color="FFFFFF")
+                    font_grey_ital  = Font(color="555555", italic=True)
+
+                    cols = list(df_data.columns)
+                    # Style header row
+                    for ci in range(1, len(cols) + 1):
+                        ws.cell(row=1, column=ci).fill = fill_blue_hdr
+                        ws.cell(row=1, column=ci).font = Font(bold=True, color="FFFFFF")
+
+                    skill_cols = ['Camping Skill', 'Overnight Hike', 'Hardship Response',
+                                  'Swimming', 'White Water', 'Group Teamwork', 'Phys Challenge']
+
+                    for xl_row, (_, row) in enumerate(df_data.iterrows(), start=2):
+                        student  = str(row.get('Student', ''))
+                        responded = str(row.get('Responded', '')) == 'Yes'
+
+                        # Found student — full green
+                        if find_name and student == find_name:
+                            for ci in range(1, len(cols) + 1):
+                                ws.cell(row=xl_row, column=ci).fill = fill_green
+                                ws.cell(row=xl_row, column=ci).font = font_bold
+                            continue
+
+                        # Draft (non-responder) — full grey italic
+                        if not responded and include_drafts:
+                            for ci in range(1, len(cols) + 1):
+                                ws.cell(row=xl_row, column=ci).fill = fill_grey
+                                ws.cell(row=xl_row, column=ci).font = font_grey_ital
+                            continue
+
+                        # Non-responder not in draft mode — yellow Responded cell
+                        if not responded and 'Responded' in cols:
+                            ws.cell(row=xl_row, column=cols.index('Responded') + 1).fill = fill_yellow
+
+                        # Pref Rank colouring
+                        if 'Pref Rank' in cols:
+                            try:
+                                _pr = int(row['Pref Rank'])
+                                _pr_cell = ws.cell(row=xl_row, column=cols.index('Pref Rank') + 1)
+                                if   _pr == 1: _pr_cell.fill = fill_pref1; _pr_cell.font = font_bold
+                                elif _pr == 2: _pr_cell.fill = fill_pref2
+                                elif _pr == 4: _pr_cell.fill = fill_pref4
+                                elif _pr == 5: _pr_cell.fill = fill_pref5; _pr_cell.font = font_bold
+                            except (ValueError, TypeError):
+                                pass
+
+                        # Friend not in same camp — pink friend cell, orange student cell
+                        if 'Friend Requested' in cols and 'Student' in cols:
+                            _f_str = str(row.get('Friend Requested', ''))
+                            if _f_str and _f_str != '—':
+                                _fl_list = [f.strip() for f in _f_str.split(',')]
+                                _all_together = all(
+                                    full_lk.get(f, (None, None, None))[:2] == (_wk_xl, _ck_xl)
+                                    for f in _fl_list)
+                                if not _all_together:
+                                    ws.cell(row=xl_row, column=cols.index('Friend Requested') + 1).fill = fill_pink
+                                    s_cell = ws.cell(row=xl_row, column=cols.index('Student') + 1)
+                                    s_cell.fill = fill_orange; s_cell.font = font_bold
+
+                        # Separation violation — red student cell
+                        if 'Student' in cols:
+                            for _a, _b in sep_pairs:
+                                if student in (_a, _b):
+                                    _other = _b if student == _a else _a
+                                    if full_lk.get(_other, (None, None, None))[:2] == (_wk_xl, _ck_xl):
+                                        s_cell = ws.cell(row=xl_row, column=cols.index('Student') + 1)
+                                        s_cell.fill = fill_red; s_cell.font = font_bold_white
+
+                        # Skill columns — dark red / orange / green by score
+                        for sc in skill_cols:
+                            if sc in cols:
+                                _val = str(row.get(sc, '')).strip()
+                                _m = re.search(r'^\s*([1-9][0-9]?)(?:\D|$)', _val)
+                                if _m:
+                                    _num = int(_m.group(1))
+                                    _sc_cell = ws.cell(row=xl_row, column=cols.index(sc) + 1)
+                                    if   1 <= _num <= 3: _sc_cell.fill = fill_skill_red; _sc_cell.font = font_bold_white
+                                    elif 4 <= _num <= 6: _sc_cell.fill = fill_skill_org; _sc_cell.font = font_bold
+                                    elif _num >= 7:      _sc_cell.fill = fill_skill_grn
+
                 _y9_out = io.BytesIO()
                 with pd.ExcelWriter(_y9_out, engine='openpyxl') as _writer:
                     # Ordered sheets: by camp type, then week, then subgroup
@@ -2329,6 +2432,9 @@ elif page == "🏔️ Y9 Journey Groups":
                         _df_sh = _export_sheets[_snm]
                         _df_sh.to_excel(_writer, sheet_name=_snm, index=False)
                         _ws = _writer.sheets[_snm]
+                        _apply_y9_excel_colors(_ws, _df_sh, _snm, full_lookup,
+                                               st.session_state.y9_sep, y9_find,
+                                               y9_include_drafts)
                         for _col in _ws.columns:
                             _ws.column_dimensions[_col[0].column_letter].width = min(
                                 max((len(str(cell.value)) for cell in _col), default=0) + 2, 45)
