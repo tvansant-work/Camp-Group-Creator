@@ -1406,11 +1406,18 @@ elif page == "🏔️ Y9 Journey Groups":
         _house_col_stud = next((c for c in df_s.columns if c.strip().lower() == 'house'), None)
         _rg_col = next((c for c in df_s.columns if 'rollgroup' in c.lower()), None)
         _letter_map = {'u': 'unwin', 'h': 'hodgkin', 'm': 'mather', 'r': 'ransome'}
+        _full_house_names = ['unwin', 'hodgkin', 'mather', 'ransome']
+        def _house_from_rg(val):
+            v = str(val).strip().lower()
+            for h in _full_house_names:  # full name anywhere e.g. "9Unwin"
+                if h in v: return h
+            for ch in ([v[0], v[-1]] if len(v) > 1 else [v[0]] if v else []):
+                if ch in _letter_map: return _letter_map[ch]
+            return ''
         if _house_col_stud:
             df_s['House_stud'] = df_s[_house_col_stud].astype(str).str.strip().str.lower()
         elif _rg_col:
-            df_s['House_stud'] = (df_s[_rg_col].astype(str).str.strip().str[-1]
-                                  .str.lower().map(_letter_map).fillna(''))
+            df_s['House_stud'] = df_s[_rg_col].apply(_house_from_rg)
         else:
             df_s['House_stud'] = ''
 
@@ -1735,6 +1742,14 @@ elif page == "🏔️ Y9 Journey Groups":
                 _unassigned = df_y9_act[df_y9_act['Week'].isna()][['Student ID', 'Official Name', 'Responded']]
                 st.dataframe(_unassigned.rename(columns={'Official Name': 'Student'}), hide_index=True)
 
+        # Show a clear banner about non-responders who are being excluded
+        _n_excl = len(df_y9_act[~df_y9_act['Responded'] & df_y9_act['Week'].notna()])
+        if _n_excl > 0 and not y9_include_drafts:
+            st.info(
+                f"ℹ️ **{_n_excl} student(s) from the student list haven't responded and are not currently "
+                f"being placed into groups.** Tick **'Draft in non-responders'** above to include them."
+            )
+
         # ── ALGORITHM HELPERS ─────────────────────────────────────────────────────────────
 
         def _determine_config(n_students, pref_data_dict, week_num):
@@ -1947,8 +1962,25 @@ elif page == "🏔️ Y9 Journey Groups":
         all_week_configs  = {}
         all_friend_reqs   = {}
 
+        # Non-responders with no house assignment: distribute evenly across weeks
+        _unknown_week_drafts = (
+            df_y9_opt[df_y9_opt['Week'].isna()].copy()
+            if y9_include_drafts else pd.DataFrame()
+        )
+        if not _unknown_week_drafts.empty:
+            # Split alphabetically so the split is deterministic
+            _ukd_sorted = _unknown_week_drafts.sort_values('Official Name').reset_index(drop=True)
+            _ukd_sorted['_assigned_wk'] = [1 if i % 2 == 0 else 2 for i in range(len(_ukd_sorted))]
+        else:
+            _ukd_sorted = pd.DataFrame()
+
         for _wk, _wk_label in [(1, "Week 1 (Unwin & Hodgkin)"), (2, "Week 2 (Mather & Ransome)")]:
             _wdf = df_y9_opt[df_y9_opt['Week'] == _wk].copy()
+            # Add any unassigned-week draft students allocated to this week
+            if not _ukd_sorted.empty:
+                _ukd_this_wk = _ukd_sorted[_ukd_sorted['_assigned_wk'] == _wk].drop(columns=['_assigned_wk'])
+                if not _ukd_this_wk.empty:
+                    _wdf = pd.concat([_wdf, _ukd_this_wk], ignore_index=True)
 
             # Apply force-week overrides: students whose home week differs from _wk
             # but have been explicitly forced into this week are added here;
@@ -2137,8 +2169,11 @@ elif page == "🏔️ Y9 Journey Groups":
                     _mp = Y9_CAMP_DEFS[_ck]['max_per']
 
                     for _wk in [1, 2]:
-                        _wdf = df_y9_act[df_y9_act['Week'] == _wk]
-                        if _wdf.empty: continue
+                        _wdf_hdr = df_y9_act[df_y9_act['Week'] == _wk]
+                        # Use the full active pool for lookups so non-responders with
+                        # unknown/NaN week (assigned via draft mode) are still found
+                        _wdf = df_y9_act.copy()
+                        if _wdf_hdr.empty and all_week_results.get(_wk, {}) == {}: continue
                         _week_groups = all_week_results.get(_wk, {})
 
                         _wt = ("📅 **Week 1: Unwin & Hodgkin** (12–18 November)"
@@ -2154,8 +2189,8 @@ elif page == "🏔️ Y9 Journey Groups":
                         _has_b = len(_subgroups.get('B', [])) > 0
                         _sg_keys = ['A', 'B'] if _has_b else ['A']
 
-                        _pref_w  = dict(zip(_wdf['Official Name'], _wdf['Camp Prefs']))
-                        _fr_w    = dict(zip(_wdf['Official Name'], _wdf['Friends Requested']))
+                        _pref_w  = {n: p for n, p in zip(_wdf['Official Name'], _wdf['Camp Prefs']) if isinstance(p, dict)}
+                        _fr_w    = {n: f for n, f in zip(_wdf['Official Name'], _wdf['Friends Requested']) if isinstance(f, list)}
 
                         _sg_containers = st.columns(2) if _has_b else [st.container()]
 
