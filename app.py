@@ -22,7 +22,7 @@ students_file  = st.sidebar.file_uploader("Student List (CSV)",      type=["csv"
 # ── Tool selection comes FIRST so Y8 processing can be gated by page ─────────
 st.sidebar.markdown("---")
 st.sidebar.header("🎯 2. Select Tool")
-page = st.sidebar.radio("", ["🏕️ Y8 Group Creator", "🏔️ Y9 Journey Groups", "📋 Final Roster & Leader Builder"])
+page = st.sidebar.radio("Select tool", ["🏕️ Y8 Group Creator", "🏔️ Y9 Journey Groups", "📋 Final Roster & Leader Builder"], label_visibility="collapsed")
 
 # ── Y8 global data processing (only when a Y8 tool is active) ────────────────
 df_merged_full = None
@@ -120,6 +120,8 @@ if page == "🏕️ Y8 Group Creator":
                         if 'reward_friend_2' not in st.session_state.weights: st.session_state.weights['reward_friend_2'] = 100
                     
                     st.session_state.last_loaded_file = settings_file.file_id
+                    if 'y8_na_ms' in st.session_state:
+                        del st.session_state['y8_na_ms']
                     st.sidebar.success("Settings loaded successfully!")
                     st.rerun() 
                 except Exception as e:
@@ -154,7 +156,7 @@ if page == "🏕️ Y8 Group Creator":
 
         # --- UI: NOT ATTENDING ---
         st.sidebar.header("🚫 Not Attending")
-        not_attending_list = st.sidebar.multiselect("Select students:", options=all_students_list, default=st.session_state.not_attending)
+        not_attending_list = st.sidebar.multiselect("Select students:", options=all_students_list, default=st.session_state.not_attending, key="y8_na_ms")
         st.session_state.not_attending = not_attending_list
 
         df_merged = df_merged_full[~df_merged_full['Official Name'].isin(not_attending_list)].copy()
@@ -1522,6 +1524,8 @@ elif page == "🏔️ Y9 Journey Groups":
                         st.session_state.y9_weights.update(_loaded['weights'])
                     st.session_state.y9_include_drafts = _loaded.get('include_drafts', False)
                     st.session_state.y9_last_loaded = _y9_json_upload.file_id
+                    if 'y9_na_ms' in st.session_state:
+                        del st.session_state['y9_na_ms']
                     st.sidebar.success("✅ Y9 settings loaded!")
                     st.rerun()
                 except Exception:
@@ -1705,7 +1709,7 @@ elif page == "🏔️ Y9 Journey Groups":
         if y9_include_drafts:
             df_y9_opt = df_y9_act.copy()
         else:
-            df_y9_opt = df_y9_act[df_y9_act['Responded']].copy()
+            df_y9_opt = df_y9_act[df_y9_act["Responded"]].copy()
 
         # ── WEEK SUMMARY ──────────────────────────────────────────────────────────────────
         _force_week_rules = st.session_state.get('y9_force_week', {})
@@ -1969,7 +1973,6 @@ elif page == "🏔️ Y9 Journey Groups":
             _week_students = set(_wdf['Official Name'])
 
             # Build friend requests (only within same week + must/sep rules applied)
-            # First pass: build requests for all students who responded
             _wfr = {}
             for _, _row in _wdf.iterrows():
                 _st = _row['Official Name']
@@ -1982,30 +1985,21 @@ elif page == "🏔️ Y9 Journey Groups":
                     if _st == _a and _b in _fr: _fr.remove(_b)
                     if _st == _b and _a in _fr: _fr.remove(_a)
                 _wfr[_st] = _fr
-            # Second pass (draft mode): for non-responders, inject reverse requests so
-            # the optimiser knows who wants to be with them and places them together.
+            # Draft mode: non-responders have no friend list of their own, so inject
+            # reverse requests — if any responder requested a non-responder, add that
+            # responder to the non-responder's friend list so the optimiser keeps them together.
             if y9_include_drafts:
-                _non_resp_in_week = set(
-                    r['Official Name'] for _, r in _wdf.iterrows() if not r['Responded']
-                )
+                _non_resp_in_week = {r['Official Name'] for _, r in _wdf.iterrows() if not r['Responded']}
                 for _draft_st in _non_resp_in_week:
-                    _reverse = [
-                        other for other, reqs in _wfr.items()
-                        if _draft_st in reqs and other != _draft_st
-                    ]
-                    # Also honour must-go-with rules for non-responders
+                    _reverse = [o for o, reqs in _wfr.items() if _draft_st in reqs and o != _draft_st]
                     for _a, _b in st.session_state.y9_must:
-                        if _draft_st == _a and _b in _week_students and _b not in _reverse:
-                            _reverse.append(_b)
-                        if _draft_st == _b and _a in _week_students and _a not in _reverse:
-                            _reverse.append(_a)
+                        if _draft_st == _a and _b in _week_students and _b not in _reverse: _reverse.append(_b)
+                        if _draft_st == _b and _a in _week_students and _a not in _reverse: _reverse.append(_a)
                     _wfr[_draft_st] = _reverse
             all_friend_reqs.update(_wfr)
 
-            # Use only responders' prefs for camp config sizing; non-responders just fill space
-            _resp_wdf = _wdf[_wdf['Responded']] if y9_include_drafts else _wdf
             _pref_dict = dict(zip(_wdf['Official Name'], _wdf['Camp Prefs']))
-            _config = _determine_config(len(_wdf), dict(zip(_resp_wdf['Official Name'], _resp_wdf['Camp Prefs'])), _wk)
+            _config = _determine_config(len(_wdf), _pref_dict, _wk)
             _caps   = _get_caps(_config)
             all_week_configs[_wk] = _config
 
@@ -2116,12 +2110,12 @@ elif page == "🏔️ Y9 Journey Groups":
                     _sz_b = len(_grps.get('B', []))
                     if _ni == 1:
                         _cfg_rows.append({
-                            'Camp': Y9_CAMP_DEFS[_ck]['label'], 'Instances': 1,
-                            'Max Per Group': _mp, 'Assigned': _sz_a, 'Group B': '—'})
+                            'Camp': Y9_CAMP_DEFS[_ck]['label'], 'Instances': '1',
+                            'Max Per Group': str(_mp), 'Assigned': str(_sz_a), 'Group B': '—'})
                     else:
                         _cfg_rows.append({
-                            'Camp': Y9_CAMP_DEFS[_ck]['label'], 'Instances': 2,
-                            'Max Per Group': _mp, 'Group A': _sz_a, 'Group B': _sz_b})
+                            'Camp': Y9_CAMP_DEFS[_ck]['label'], 'Instances': '2',
+                            'Max Per Group': str(_mp), 'Group A': str(_sz_a), 'Group B': str(_sz_b)})
                 st.dataframe(pd.DataFrame(_cfg_rows), hide_index=True, use_container_width=True)
 
         # ── RESULTS TABS (one per camp type) ──────────────────────────────────────────────
