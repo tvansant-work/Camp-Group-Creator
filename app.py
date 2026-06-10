@@ -2079,12 +2079,15 @@ elif page == "🏔️ Y9 Journey Groups":
                     if _st == _a and _b in _fr: _fr.remove(_b)
                     if _st == _b and _a in _fr: _fr.remove(_a)
                 _wfr[_st] = _fr
+            all_friend_reqs.update(_wfr)
+
+            # _pref_dict must be built before the draft pref-inheritance block below
+            _pref_dict = dict(zip(_wdf['Official Name'], _wdf['Camp Prefs']))
+
             # Draft mode: non-responders have no friend list or preferences of their own.
             # 1. Inject reverse requests so the optimiser keeps them with whoever requested them.
-            # 2. Copy the requester's camp preferences so the non-responder is placed in the
-            #    same camp type that their requester wants.
-            # 3. Boost the friend-pair reward to near-must-go-with level so they are
-            #    virtually guaranteed to be together.
+            # 2. Copy the requester's camp preferences so the non-responder mirrors their
+            #    camp wishes and is placed together with them.
             if y9_include_drafts:
                 _non_resp_in_week = {r['Official Name'] for _, r in _wdf.iterrows() if not r['Responded']}
                 for _draft_st in _non_resp_in_week:
@@ -2092,15 +2095,15 @@ elif page == "🏔️ Y9 Journey Groups":
                     for _a, _b in st.session_state.y9_must:
                         if _draft_st == _a and _b in _week_students and _b not in _reverse: _reverse.append(_b)
                         if _draft_st == _b and _a in _week_students and _a not in _reverse: _reverse.append(_a)
-                    _wfr[_draft_st] = _reverse
-                    # Inherit camp preferences from the first person who requested this student
-                    if _reverse and _draft_st in _pref_dict and not _pref_dict[_draft_st]:
+                    _wfr[_st] = _reverse
+                    # Inherit camp preferences from the first requester so the
+                    # non-responder is placed in the same camp the requester wants
+                    if _reverse and not _pref_dict.get(_draft_st):
                         _requester_prefs = _pref_dict.get(_reverse[0], {})
                         if _requester_prefs:
                             _pref_dict[_draft_st] = _requester_prefs
-            all_friend_reqs.update(_wfr)
-
-            _pref_dict = dict(zip(_wdf['Official Name'], _wdf['Camp Prefs']))
+                # Update friend requests with the reverse lookups
+                all_friend_reqs.update(_wfr)
             _config = _determine_config(len(_wdf), _pref_dict, _wk)
             _caps   = _get_caps(_config)
             all_week_configs[_wk] = _config
