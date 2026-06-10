@@ -111,7 +111,15 @@ if page == "🏕️ Y8 Group Creator":
                     st.session_state.must_go_pairs = [tuple(x) for x in settings.get('must_go_pairs', [])]
                     st.session_state.forced_locations = settings.get('forced_locations', {})
                     
-                    loaded_na = [s for s in settings.get('not_attending', []) if s in all_students_list]
+                    _all_stud_set = set(all_students_list)
+                    _lower_stud_map = {n.lower(): n for n in all_students_list}
+                    loaded_na = []
+                    for _nm in settings.get('not_attending', []):
+                        _nm_s = str(_nm).strip()
+                        if _nm_s in _all_stud_set:
+                            loaded_na.append(_nm_s)
+                        elif _nm_s.lower() in _lower_stud_map:
+                            loaded_na.append(_lower_stud_map[_nm_s.lower()])
                     st.session_state.not_attending = loaded_na
                     
                     if 'weights' in settings:
@@ -1529,7 +1537,32 @@ elif page == "🏔️ Y9 Journey Groups":
                     st.session_state.y9_must       = [tuple(x) for x in _loaded.get('must',  [])]
                     st.session_state.y9_force      = _loaded.get('force', {})
                     st.session_state.y9_force_week = _loaded.get('force_week', {})
-                    _l_na = [s for s in _loaded.get('na', []) if s in all_y9]
+                    # Try to match loaded names directly first; fall back to
+                    # matching by student ID via na_details for robustness.
+                    _all_y9_set = set(all_y9)
+                    _all_y9_by_id = {
+                        str(r.get('Student ID', '')).strip(): r['Official Name']
+                        for _, r in df_y9.iterrows()
+                    }
+                    _loaded_na_names = _loaded.get('na', [])
+                    _loaded_na_details = _loaded.get('na_details', [])
+                    _l_na = []
+                    for _nm in _loaded_na_names:
+                        _nm_strip = str(_nm).strip()
+                        if _nm_strip in _all_y9_set:
+                            _l_na.append(_nm_strip)  # exact match
+                        else:
+                            # Try case-insensitive match
+                            _lower_map = {n.lower(): n for n in all_y9}
+                            if _nm_strip.lower() in _lower_map:
+                                _l_na.append(_lower_map[_nm_strip.lower()])
+                    # Also add any from na_details matched by student ID (catches name changes)
+                    for _det in _loaded_na_details:
+                        _sid = str(_det.get('student_id', '')).strip()
+                        if _sid and _sid in _all_y9_by_id:
+                            _matched = _all_y9_by_id[_sid]
+                            if _matched not in _l_na:
+                                _l_na.append(_matched)
                     st.session_state.y9_na = _l_na
                     if 'weights' in _loaded:
                         st.session_state.y9_weights.update(_loaded['weights'])
