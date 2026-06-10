@@ -1852,102 +1852,170 @@ elif page == "🏔️ Y9 Journey Groups":
             return {k: Y9_CAMP_DEFS[k]['max_per'] * v for k, v in config.items()}
 
         def _optimize_assignment(week_df, config, caps, friend_reqs, forced,
-                                 must_pairs, sep_pairs, seed_str, depth, gender_lookup=None):
-            """Phase 1: assign every student to a camp TYPE via hill-climbing."""
-            active = list(config.keys())
+                                 must_pairs, sep_pairs, seed_str, depth,
+                                 gender_lookup=None, pref_dict_override=None,
+                                 friend_must_pairs=None):
+            """Phase 1: assign every student to a camp TYPE via hill-climbing.
+
+            Key design decisions
+            ────────────────────
+            • pref_dict_override  — use the caller-built pref dict (includes draft
+                                    inheritance) rather than re-reading week_df.
+            • friend_must_pairs   — mutual friend requests and draft-student requests
+                                    are treated as must-go-with constraints.
+            • Hard cap            — any assignment over capacity returns -inf.
+            • Smart seeding       — greedy seed places friend-pair members together
+                                    in the same camp before random placement.
+            • Targeted moves      — 30 % of moves specifically try to unite separated
+                                    friend pairs rather than random exploration.
+            """
+            active   = list(config.keys())
             students = list(week_df['Official Name'])
-            pref_data = dict(zip(week_df['Official Name'], week_df['Camp Prefs']))
+            # Use the caller-supplied pref dict (has draft inheritance baked in)
+            pref_data = pref_dict_override if pref_dict_override else {
+                n: (p if isinstance(p, dict) else {})
+                for n, p in zip(week_df['Official Name'], week_df['Camp Prefs'])
+            }
+            _fmp = friend_must_pairs or []
+            # Combine explicit must_pairs with friend-derived must pairs
+            _all_must = list(must_pairs) + _fmp
 
             _yw = st.session_state.y9_weights
-            W_PREF   = _yw.get('w_pref',   100)
-            W_FRIEND = _yw.get('w_friend',  6000)
-            W_CAP    = _yw.get('w_cap',     600000)
-            W_FORCE  = _yw.get('w_force',   1000000)
-            W_MUST   = _yw.get('w_must',    1000000)
-            W_SEP    = _yw.get('w_sep',     500000)
+            W_PREF      = _yw.get('w_pref',   1)
+            W_FRIEND    = _yw.get('w_friend',  8000)
+            W_FORCE     = _yw.get('w_force',   1000000)
+            W_MUST      = _yw.get('w_must',    1000000)
+            W_SEP       = _yw.get('w_sep',     500000)
             W_G_SOLE    = _yw.get('w_gender_sole',    150000)
             W_G_DUO     = _yw.get('w_gender_duo',      30000)
             W_G_ALLSAME = _yw.get('w_gender_allsame',   8000)
+            _PREF_SCORES = {1: 500, 2: 200, 3: -800, 4: -5000, 5: -50000}
+
+            def _count(asgn):
+                c = {x: 0 for x in active}
+                for v in asgn.values(): c[v] += 1
+                return c
 
             def _score(asgn):
                 s = 0
-                counts = {c: 0 for c in active}
-                for _c in asgn.values(): counts[_c] += 1
-                for _c, _n in counts.items():
-                    if _n > caps[_c]: return -float('inf')  # hard cap — reject entirely
-                _pref_score_map = {1: 500, 2: 200, 3: -800, 4: -5000, 5: -50000}
+                for _c, _n in _count(asgn).items():
+                    if _n > caps[_c]: return -float('inf')   # hard cap
                 for _st, _camp in asgn.items():
                     prefs = pref_data.get(_st, {})
-                    _rank = prefs.get(_camp, 3)  # default rank 3 if no preference given
-                    s += _pref_score_map.get(_rank, -800) * W_PREF
+                    s += _PREF_SCORES.get(prefs.get(_camp, 3), -800) * W_PREF
                     for _f in friend_reqs.get(_st, []):
                         if asgn.get(_f) == _camp: s += W_FRIEND
                     if _st in forced and forced[_st] in active:
                         if forced[_st] != _camp: s -= W_FORCE
-                for _a, _b in must_pairs:
+                for _a, _b in _all_must:
                     if _a in asgn and _b in asgn and asgn[_a] != asgn[_b]: s -= W_MUST
                 for _a, _b in sep_pairs:
                     if _a in asgn and _b in asgn and asgn[_a] == asgn[_b]: s -= W_SEP
-                # Gender balance per camp
                 if gender_lookup:
                     for _camp in active:
                         _members = [st for st, c in asgn.items() if c == _camp]
                         _m = sum(1 for st in _members if gender_lookup.get(st, 'o') == 'm')
                         _f = sum(1 for st in _members if gender_lookup.get(st, 'o') == 'f')
-                        # All same gender (no mix): light penalty
                         if _m == 0 and _f > 0: s -= W_G_ALLSAME
                         elif _f == 0 and _m > 0: s -= W_G_ALLSAME
                         else:
-                            # Mixed: penalise lone or duo of either gender
                             if _m == 1: s -= W_G_SOLE
                             elif _m == 2: s -= W_G_DUO
                             if _f == 1: s -= W_G_SOLE
                             elif _f == 2: s -= W_G_DUO
                 return s
 
-            if "Fast" in depth:   restarts, iters = 30,  2000
-            elif "Standard" in depth: restarts, iters = 100, 5000
-            else:                 restarts, iters = 300, 10000
-
-            random.seed(seed_str)
-            best_asgn, best_s = None, -float('inf')
-
-            for _ in range(restarts):
+            def _greedy_seed(rng):
+                """Seed by placing friend/must-pair groups together first."""
                 curr = {}
                 load = {c: 0 for c in active}
-                shuffled = students.copy(); random.shuffle(shuffled)
-                for _st in shuffled:
-                    if _st in forced and forced[_st] in active:
-                        chosen = forced[_st]
-                        # Only honour force if it won't bust the cap
-                        if load[chosen] >= caps[chosen]:
-                            chosen = None
-                    else:
-                        chosen = None
-                    if chosen is None:
-                        prefs = pref_data.get(_st, {})
-                        sorted_camps = sorted(active, key=lambda c: prefs.get(c, 3))
-                        chosen = sorted_camps[0]
-                        for _c in sorted_camps:
-                            if load[_c] < caps[_c]: chosen = _c; break
-                        # Absolute fallback: least-loaded camp (should never be needed)
-                        if load[chosen] >= caps[chosen]:
-                            chosen = min(active, key=lambda c: load[c])
-                    curr[_st] = chosen; load[chosen] += 1
 
-                curr_s = _score(curr)
-                for _ in range(iters):
-                    new = dict(curr)
-                    if random.random() < 0.7 and len(students) >= 2:
-                        _s1, _s2 = random.sample(students, 2)
-                        new[_s1], new[_s2] = curr[_s2], curr[_s1]
-                        # Swaps always keep counts equal so can't bust cap — allow
+                def _place(st, camp=None):
+                    if st in curr: return
+                    if camp and load[camp] < caps[camp]:
+                        chosen = camp
                     else:
-                        _st = random.choice(students)
-                        # Only move to a camp that still has room
-                        others = [c for c in active if c != curr[_st] and
-                                  sum(1 for v in new.values() if v == c) < caps[c]]
-                        if others: new[_st] = random.choice(others)
+                        prefs  = pref_data.get(st, {})
+                        camps_by_pref = sorted(active, key=lambda c: prefs.get(c, 3))
+                        chosen = next((c for c in camps_by_pref if load[c] < caps[c]),
+                                      min(active, key=lambda c: load[c]))
+                    curr[st] = chosen; load[chosen] += 1
+
+                # Forced placements first
+                for _st in students:
+                    if _st in forced and forced[_st] in active:
+                        if load[forced[_st]] < caps[forced[_st]]:
+                            _place(_st, forced[_st])
+
+                # Must-pairs (including friend-must-pairs) — place both together
+                shuffled_must = list(_all_must); rng.shuffle(shuffled_must)
+                for _a, _b in shuffled_must:
+                    if _a in students and _b in students:
+                        if _a not in curr and _b not in curr:
+                            prefs_a = pref_data.get(_a, {})
+                            best_c  = sorted(active, key=lambda c: prefs_a.get(c, 3))
+                            target  = next((c for c in best_c
+                                            if load[c] + 2 <= caps[c]), None)
+                            if target:
+                                _place(_a, target); _place(_b, target)
+                        elif _a in curr and _b not in curr:
+                            _place(_b, curr[_a])
+                        elif _b in curr and _a not in curr:
+                            _place(_a, curr[_b])
+
+                # Remaining students by preference
+                remaining = [s for s in students if s not in curr]
+                rng.shuffle(remaining)
+                for _st in remaining:
+                    _place(_st)
+                return curr
+
+            if "Fast" in depth:   restarts, iters = 30,  3000
+            elif "Standard" in depth: restarts, iters = 120, 6000
+            else:                     restarts, iters = 350, 12000
+
+            rng = random.Random(seed_str)
+            best_asgn, best_s = None, -float('inf')
+
+            # Build a quick lookup of separated friend pairs for targeted moves
+            _separated_pairs = [
+                (_a, _b) for _a, _b in _all_must
+                if _a in students and _b in students
+            ]
+
+            for _ in range(restarts):
+                curr   = _greedy_seed(rng)
+                curr_s = _score(curr)
+
+                for _i in range(iters):
+                    new = dict(curr)
+                    r   = rng.random()
+
+                    if r < 0.30 and _separated_pairs:
+                        # Targeted move: pick a must/friend pair that is split and
+                        # swap one of them to join the other
+                        _pair = rng.choice(_separated_pairs)
+                        _a, _b = _pair
+                        if _a in new and _b in new and new[_a] != new[_b]:
+                            # Try moving _a to _b's camp via a swap
+                            _camp_b = new[_b]
+                            _others_in_b = [s for s in students
+                                            if new[s] == _camp_b and s != _b]
+                            if _others_in_b:
+                                _swap = rng.choice(_others_in_b)
+                                new[_a], new[_swap] = new[_swap], new[_a]
+                    elif r < 0.75 and len(students) >= 2:
+                        # Standard swap (keeps counts balanced → never busts cap)
+                        _s1, _s2 = rng.sample(students, 2)
+                        new[_s1], new[_s2] = curr[_s2], curr[_s1]
+                    else:
+                        # Single move to a camp with room
+                        _st     = rng.choice(students)
+                        _counts = _count(new)
+                        _others = [c for c in active
+                                   if c != new[_st] and _counts[c] < caps[c]]
+                        if _others: new[_st] = rng.choice(_others)
+
                     ns = _score(new)
                     if ns > curr_s: curr = new; curr_s = ns
 
@@ -2066,11 +2134,12 @@ elif page == "🏔️ Y9 Journey Groups":
 
             _week_students = set(_wdf['Official Name'])
 
-            # Build friend requests (only within same week + must/sep rules applied)
+            # ── Build friend requests ────────────────────────────────────────────
+            # Step 1: responders' own requests (filtered to this week, minus NA)
             _wfr = {}
             for _, _row in _wdf.iterrows():
                 _st = _row['Official Name']
-                _fr = [f for f in _row['Friends Requested']
+                _fr = [f for f in (_row['Friends Requested'] if isinstance(_row['Friends Requested'], list) else [])
                        if f in _week_students and f not in _y9_na]
                 for _a, _b in st.session_state.y9_must:
                     if _st == _a and _b in _week_students and _b not in _fr: _fr.append(_b)
@@ -2079,31 +2148,53 @@ elif page == "🏔️ Y9 Journey Groups":
                     if _st == _a and _b in _fr: _fr.remove(_b)
                     if _st == _b and _a in _fr: _fr.remove(_a)
                 _wfr[_st] = _fr
-            all_friend_reqs.update(_wfr)
 
-            # _pref_dict must be built before the draft pref-inheritance block below
-            _pref_dict = dict(zip(_wdf['Official Name'], _wdf['Camp Prefs']))
+            # Step 2: build pref_dict now so draft inheritance can use it
+            _pref_dict = {
+                n: (p if isinstance(p, dict) else {})
+                for n, p in zip(_wdf['Official Name'], _wdf['Camp Prefs'])
+            }
 
-            # Draft mode: non-responders have no friend list or preferences of their own.
-            # 1. Inject reverse requests so the optimiser keeps them with whoever requested them.
-            # 2. Copy the requester's camp preferences so the non-responder mirrors their
-            #    camp wishes and is placed together with them.
+            # Step 3: draft mode — give non-responders reverse requests + inherited prefs
             if y9_include_drafts:
                 _non_resp_in_week = {r['Official Name'] for _, r in _wdf.iterrows() if not r['Responded']}
                 for _draft_st in _non_resp_in_week:
-                    _reverse = [o for o, reqs in _wfr.items() if _draft_st in reqs and o != _draft_st]
+                    # Everyone who requested this student
+                    _reverse = [o for o, reqs in _wfr.items()
+                                if _draft_st in reqs and o != _draft_st]
                     for _a, _b in st.session_state.y9_must:
-                        if _draft_st == _a and _b in _week_students and _b not in _reverse: _reverse.append(_b)
-                        if _draft_st == _b and _a in _week_students and _a not in _reverse: _reverse.append(_a)
-                    _wfr[_st] = _reverse
-                    # Inherit camp preferences from the first requester so the
-                    # non-responder is placed in the same camp the requester wants
+                        if _draft_st == _a and _b in _week_students and _b not in _reverse:
+                            _reverse.append(_b)
+                        if _draft_st == _b and _a in _week_students and _a not in _reverse:
+                            _reverse.append(_a)
+                    _wfr[_draft_st] = _reverse          # ← correct key: _draft_st not _st
+                    # Inherit the first requester's camp preferences
                     if _reverse and not _pref_dict.get(_draft_st):
-                        _requester_prefs = _pref_dict.get(_reverse[0], {})
-                        if _requester_prefs:
-                            _pref_dict[_draft_st] = _requester_prefs
-                # Update friend requests with the reverse lookups
-                all_friend_reqs.update(_wfr)
+                        _req_prefs = _pref_dict.get(_reverse[0], {})
+                        if _req_prefs:
+                            _pref_dict[_draft_st] = _req_prefs
+
+            # Step 4: convert friend pairs into pseudo-must pairs so the optimiser
+            # treats them as near-hard constraints rather than soft rewards.
+            # Only pairs where BOTH students requested each other (mutual) or where
+            # one is a non-responder (who can't request back) get elevated.
+            _non_resp_names = (
+                {r['Official Name'] for _, r in _wdf.iterrows() if not r['Responded']}
+                if y9_include_drafts else set()
+            )
+            _friend_must_pairs = []
+            _seen_fp = set()
+            for _st, _reqs in _wfr.items():
+                for _f in _reqs:
+                    _pair = tuple(sorted([_st, _f]))
+                    if _pair in _seen_fp: continue
+                    _seen_fp.add(_pair)
+                    _mutual = _f in _wfr and _st in _wfr[_f]
+                    _one_is_draft = _st in _non_resp_names or _f in _non_resp_names
+                    if _mutual or _one_is_draft:
+                        _friend_must_pairs.append((_st, _f))
+
+            all_friend_reqs.update(_wfr)
             _config = _determine_config(len(_wdf), _pref_dict, _wk)
             _caps   = _get_caps(_config)
             all_week_configs[_wk] = _config
@@ -2136,7 +2227,9 @@ elif page == "🏔️ Y9 Journey Groups":
                         _wdf, _config, _caps, _wfr,
                         _forced_wk, _must_wk, _sep_wk,
                         f"y9_w{_wk}_{st.session_state.y9_seed}", y9_depth,
-                        gender_lookup=_gender_lk
+                        gender_lookup=_gender_lk,
+                        pref_dict_override=_pref_dict,
+                        friend_must_pairs=_friend_must_pairs,
                     )
 
                 _week_groups = {}
