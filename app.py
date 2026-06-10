@@ -1358,9 +1358,13 @@ elif page == "🏔️ Y9 Journey Groups":
     HOUSE_WEEK = {**{h: 1 for h in WEEK1_HOUSES}, **{h: 2 for h in WEEK2_HOUSES}}
 
     # ── Default AI weights ────────────────────────────────────────────────────────────────
+    # Preference rank → score mapping (exponential: pref 5 is near-impossible)
+    # Rank: 1=best … 5=worst
+    Y9_PREF_SCORES = {1: 500, 2: 200, 3: -800, 4: -5000, 5: -50000}
+
     Y9_DEFAULT_WEIGHTS = {
-        'w_pref':     100,      # Preference rank score multiplier
-        'w_friend':   6000,     # Friend pair in same camp reward
+        'w_pref':     1,        # Multiplier on Y9_PREF_SCORES (keep at 1; tune via pref_scores)
+        'w_friend':   8000,     # Friend pair in same camp reward (raised: guarantee requesters together)
         'w_cap':      600000,   # Over-capacity penalty (per student over limit)
         'w_force':    1000000,  # Forced camp violated penalty
         'w_must':     1000000,  # Must-go-with split penalty
@@ -1378,7 +1382,7 @@ elif page == "🏔️ Y9 Journey Groups":
     for _k, _v in [('y9_sep', []), ('y9_must', []), ('y9_force', {}),
                    ('y9_force_week', {}),
                    ('y9_na', []), ('y9_seed', 0), ('y9_results', {}), ('y9_states', {}),
-                   ('y9_include_drafts', False)]:
+                   ('y9_include_drafts', False), ('y9_generated', False)]:
         if _k not in st.session_state:
             st.session_state[_k] = _v
     if 'y9_weights' not in st.session_state:
@@ -1693,8 +1697,18 @@ elif page == "🏔️ Y9 Journey Groups":
             y9_depth = st.select_slider(
                 "Search Depth:", ["Fast (1-2s)", "Standard (5-10s)", "Deep Search (20-40s)"],
                 value="Standard (5-10s)", key="y9_depth")
-            if st.button("🔄 Regenerate Y9 Groups", use_container_width=True, key="y9_regen"):
-                st.session_state.y9_seed += 1; st.rerun()
+            _btn_col1, _btn_col2 = st.columns(2)
+            with _btn_col1:
+                if st.button("▶️ Generate Groups", use_container_width=True, key="y9_generate",
+                             type="primary"):
+                    st.session_state.y9_generated = True
+                    st.session_state.y9_results = {}
+                    st.session_state.y9_states = {}
+                    st.rerun()
+            with _btn_col2:
+                if st.button("🔄 Regenerate", use_container_width=True, key="y9_regen",
+                             disabled=not st.session_state.y9_generated):
+                    st.session_state.y9_seed += 1; st.rerun()
         with _col_draft:
             st.subheader("✏️ Draft Mode")
             _n_no_resp = len(df_y9_act[~df_y9_act["Responded"]])
@@ -1829,10 +1843,12 @@ elif page == "🏔️ Y9 Journey Groups":
                 counts = {c: 0 for c in active}
                 for _c in asgn.values(): counts[_c] += 1
                 for _c, _n in counts.items():
-                    if _n > caps[_c]: s -= W_CAP * (_n - caps[_c])
+                    if _n > caps[_c]: return -float('inf')  # hard cap — reject entirely
+                _pref_score_map = {1: 500, 2: 200, 3: -800, 4: -5000, 5: -50000}
                 for _st, _camp in asgn.items():
                     prefs = pref_data.get(_st, {})
-                    s += (6 - prefs.get(_camp, 3)) * W_PREF
+                    _rank = prefs.get(_camp, 3)  # default rank 3 if no preference given
+                    s += _pref_score_map.get(_rank, -800) * W_PREF
                     for _f in friend_reqs.get(_st, []):
                         if asgn.get(_f) == _camp: s += W_FRIEND
                     if _st in forced and forced[_st] in active:
@@ -1872,12 +1888,20 @@ elif page == "🏔️ Y9 Journey Groups":
                 for _st in shuffled:
                     if _st in forced and forced[_st] in active:
                         chosen = forced[_st]
+                        # Only honour force if it won't bust the cap
+                        if load[chosen] >= caps[chosen]:
+                            chosen = None
                     else:
+                        chosen = None
+                    if chosen is None:
                         prefs = pref_data.get(_st, {})
                         sorted_camps = sorted(active, key=lambda c: prefs.get(c, 3))
                         chosen = sorted_camps[0]
                         for _c in sorted_camps:
                             if load[_c] < caps[_c]: chosen = _c; break
+                        # Absolute fallback: least-loaded camp (should never be needed)
+                        if load[chosen] >= caps[chosen]:
+                            chosen = min(active, key=lambda c: load[c])
                     curr[_st] = chosen; load[chosen] += 1
 
                 curr_s = _score(curr)
@@ -1886,9 +1910,12 @@ elif page == "🏔️ Y9 Journey Groups":
                     if random.random() < 0.7 and len(students) >= 2:
                         _s1, _s2 = random.sample(students, 2)
                         new[_s1], new[_s2] = curr[_s2], curr[_s1]
+                        # Swaps always keep counts equal so can't bust cap — allow
                     else:
                         _st = random.choice(students)
-                        others = [c for c in active if c != curr[_st]]
+                        # Only move to a camp that still has room
+                        others = [c for c in active if c != curr[_st] and
+                                  sum(1 for v in new.values() if v == c) < caps[c]]
                         if others: new[_st] = random.choice(others)
                     ns = _score(new)
                     if ns > curr_s: curr = new; curr_s = ns
@@ -1962,6 +1989,10 @@ elif page == "🏔️ Y9 Journey Groups":
         all_week_configs  = {}
         all_friend_reqs   = {}
 
+        if not st.session_state.y9_generated:
+            st.info("👆 Configure your rules above, then click **▶️ Generate Groups** to run the optimiser.")
+            st.stop()
+
         # Non-responders with no house assignment: distribute evenly across weeks
         _unknown_week_drafts = (
             df_y9_opt[df_y9_opt['Week'].isna()].copy()
@@ -2017,9 +2048,12 @@ elif page == "🏔️ Y9 Journey Groups":
                     if _st == _a and _b in _fr: _fr.remove(_b)
                     if _st == _b and _a in _fr: _fr.remove(_a)
                 _wfr[_st] = _fr
-            # Draft mode: non-responders have no friend list of their own, so inject
-            # reverse requests — if any responder requested a non-responder, add that
-            # responder to the non-responder's friend list so the optimiser keeps them together.
+            # Draft mode: non-responders have no friend list or preferences of their own.
+            # 1. Inject reverse requests so the optimiser keeps them with whoever requested them.
+            # 2. Copy the requester's camp preferences so the non-responder is placed in the
+            #    same camp type that their requester wants.
+            # 3. Boost the friend-pair reward to near-must-go-with level so they are
+            #    virtually guaranteed to be together.
             if y9_include_drafts:
                 _non_resp_in_week = {r['Official Name'] for _, r in _wdf.iterrows() if not r['Responded']}
                 for _draft_st in _non_resp_in_week:
@@ -2028,6 +2062,11 @@ elif page == "🏔️ Y9 Journey Groups":
                         if _draft_st == _a and _b in _week_students and _b not in _reverse: _reverse.append(_b)
                         if _draft_st == _b and _a in _week_students and _a not in _reverse: _reverse.append(_a)
                     _wfr[_draft_st] = _reverse
+                    # Inherit camp preferences from the first person who requested this student
+                    if _reverse and _draft_st in _pref_dict and not _pref_dict[_draft_st]:
+                        _requester_prefs = _pref_dict.get(_reverse[0], {})
+                        if _requester_prefs:
+                            _pref_dict[_draft_st] = _requester_prefs
             all_friend_reqs.update(_wfr)
 
             _pref_dict = dict(zip(_wdf['Official Name'], _wdf['Camp Prefs']))
