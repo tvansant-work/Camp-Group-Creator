@@ -127,9 +127,10 @@ if page == "🏕️ Y8 Group Creator":
                         if 'reward_friend_1' not in st.session_state.weights: st.session_state.weights['reward_friend_1'] = 120
                         if 'reward_friend_2' not in st.session_state.weights: st.session_state.weights['reward_friend_2'] = 100
                     
+                    # Write directly into the widget key — identical to manual selection
+                    st.session_state['y8_na_ms'] = loaded_na
+                    st.session_state.not_attending = loaded_na
                     st.session_state.last_loaded_file = settings_file.file_id
-                    if 'y8_na_ms' in st.session_state:
-                        del st.session_state['y8_na_ms']
                     st.sidebar.success("Settings loaded successfully!")
                     st.rerun() 
                 except Exception as e:
@@ -164,7 +165,7 @@ if page == "🏕️ Y8 Group Creator":
 
         # --- UI: NOT ATTENDING ---
         st.sidebar.header("🚫 Not Attending")
-        not_attending_list = st.sidebar.multiselect("Select students:", options=all_students_list, default=st.session_state.not_attending, key="y8_na_ms")
+        not_attending_list = st.sidebar.multiselect("Select students:", options=all_students_list, key="y8_na_ms")
         st.session_state.not_attending = not_attending_list
 
         df_merged = df_merged_full[~df_merged_full['Official Name'].isin(not_attending_list)].copy()
@@ -1537,51 +1538,48 @@ elif page == "🏔️ Y9 Journey Groups":
                     st.session_state.y9_must       = [tuple(x) for x in _loaded.get('must',  [])]
                     st.session_state.y9_force      = _loaded.get('force', {})
                     st.session_state.y9_force_week = _loaded.get('force_week', {})
-                    # Try to match loaded names directly first; fall back to
-                    # matching by student ID via na_details for robustness.
-                    _all_y9_set = set(all_y9)
-                    _all_y9_by_id = {
-                        str(r.get('Student ID', '')).strip(): r['Official Name']
-                        for _, r in df_y9.iterrows()
-                    }
-                    _loaded_na_names = _loaded.get('na', [])
-                    _loaded_na_details = _loaded.get('na_details', [])
-                    _l_na = []
-                    for _nm in _loaded_na_names:
-                        _nm_strip = str(_nm).strip()
-                        if _nm_strip in _all_y9_set:
-                            _l_na.append(_nm_strip)  # exact match
-                        else:
-                            # Try case-insensitive match
-                            _lower_map = {n.lower(): n for n in all_y9}
-                            if _nm_strip.lower() in _lower_map:
-                                _l_na.append(_lower_map[_nm_strip.lower()])
-                    # Also add any from na_details matched by student ID (catches name changes)
-                    for _det in _loaded_na_details:
-                        _sid = str(_det.get('student_id', '')).strip()
-                        if _sid and _sid in _all_y9_by_id:
-                            _matched = _all_y9_by_id[_sid]
-                            if _matched not in _l_na:
-                                _l_na.append(_matched)
-                    st.session_state.y9_na = _l_na
                     if 'weights' in _loaded:
                         st.session_state.y9_weights.update(_loaded['weights'])
                     st.session_state.y9_include_drafts = _loaded.get('include_drafts', False)
+                    # Resolve not-attending names against the current student list.
+                    # Match by exact name, then case-insensitive, then student ID.
+                    _all_y9_set    = set(all_y9)
+                    _lower_map     = {n.lower(): n for n in all_y9}
+                    _id_map        = {
+                        str(r.get('Student ID', '')).strip(): r['Official Name']
+                        for _, r in df_y9.iterrows()
+                    }
+                    _l_na = []
+                    for _nm in _loaded.get('na', []):
+                        _s = str(_nm).strip()
+                        if _s in _all_y9_set:
+                            _l_na.append(_s)
+                        elif _s.lower() in _lower_map:
+                            _l_na.append(_lower_map[_s.lower()])
+                    for _det in _loaded.get('na_details', []):
+                        _sid = str(_det.get('student_id', '')).strip()
+                        if _sid in _id_map and _id_map[_sid] not in _l_na:
+                            _l_na.append(_id_map[_sid])
+                    # Write directly into the widget key — this is what Streamlit
+                    # actually reads when it renders the multiselect, identical to
+                    # the user having selected those values manually.
+                    st.session_state['y9_na_ms'] = _l_na
+                    st.session_state.y9_na = _l_na
                     st.session_state.y9_last_loaded = _y9_json_upload.file_id
-                    if 'y9_na_ms' in st.session_state:
-                        del st.session_state['y9_na_ms']
                     st.sidebar.success("✅ Y9 settings loaded!")
                     st.rerun()
-                except Exception:
-                    st.sidebar.error("❌ Could not parse the JSON file.")
+                except Exception as _e:
+                    st.sidebar.error(f"❌ Could not parse the JSON file: {_e}")
 
         st.sidebar.markdown("---")
 
         # ── Not Attending ─────────────────────────────────────────────────────────────────
+        # The widget key 'y9_na_ms' is the single source of truth.
+        # On load, we write directly into it above so it behaves exactly
+        # like a manual selection — no default= fighting session state.
         st.sidebar.header("🏔️ Y9: Not Attending")
         _y9_na = st.sidebar.multiselect(
-            "Students not attending:", options=all_y9,
-            default=st.session_state.y9_na, key="y9_na_ms")
+            "Students not attending:", options=all_y9, key="y9_na_ms")
         st.session_state.y9_na = _y9_na
 
         df_y9_act = df_y9[~df_y9['Official Name'].isin(_y9_na)].copy()
