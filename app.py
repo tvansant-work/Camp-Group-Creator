@@ -1230,12 +1230,17 @@ elif page == "🏔️ Y9 Journey Groups":
         'sg_balance': 15,       # Sub-group size imbalance multiplier
         'sg_cap':     600000,   # Sub-group over-capacity penalty
         'sg_friend':  400,      # Sub-group friend pair reward
+        # Gender balance weights (applied per camp/subgroup)
+        'w_gender_sole':    150000,  # Exactly 1 of a gender in group (worst)
+        'w_gender_duo':      30000,  # Exactly 2 of a gender in group (medium)
+        'w_gender_allsame':   8000,  # All same gender (better than sole, worse than mixed)
     }
 
     # ── Session State ─────────────────────────────────────────────────────────────────────
     for _k, _v in [('y9_sep', []), ('y9_must', []), ('y9_force', {}),
                    ('y9_force_week', {}),
-                   ('y9_na', []), ('y9_seed', 0), ('y9_results', {}), ('y9_states', {})]:
+                   ('y9_na', []), ('y9_seed', 0), ('y9_results', {}), ('y9_states', {}),
+                   ('y9_include_drafts', False)]:
         if _k not in st.session_state:
             st.session_state[_k] = _v
     if 'y9_weights' not in st.session_state:
@@ -1379,6 +1384,7 @@ elif page == "🏔️ Y9 Journey Groups":
                     st.session_state.y9_na = _l_na
                     if 'weights' in _loaded:
                         st.session_state.y9_weights.update(_loaded['weights'])
+                    st.session_state.y9_include_drafts = _loaded.get('include_drafts', False)
                     st.session_state.y9_last_loaded = _y9_json_upload.file_id
                     st.sidebar.success("✅ Y9 settings loaded!")
                     st.rerun()
@@ -1394,8 +1400,21 @@ elif page == "🏔️ Y9 Journey Groups":
             default=st.session_state.y9_na, key="y9_na_ms")
         st.session_state.y9_na = _y9_na
 
+        y9_include_drafts = st.sidebar.checkbox(
+            "✏️ Draft in students who haven't responded (shown in grey)",
+            value=st.session_state.y9_include_drafts, key="y9_drafts_cb")
+        st.session_state.y9_include_drafts = y9_include_drafts
+        if y9_include_drafts:
+            st.sidebar.caption("Non-responding students will be slotted into groups and shown with a grey background.")
+
         df_y9_act = df_y9[~df_y9['Official Name'].isin(_y9_na)].copy()
         attending_y9 = sorted(df_y9_act['Official Name'].dropna().unique().tolist())
+
+        # Optimisation pool: responders only (unless draft mode is on)
+        if y9_include_drafts:
+            df_y9_opt = df_y9_act.copy()
+        else:
+            df_y9_opt = df_y9_act[df_y9_act['Responded']].copy()
 
         # Force camp
         st.sidebar.header("📍 Y9: Force Camp")
@@ -1488,6 +1507,10 @@ elif page == "🏔️ Y9 Journey Groups":
             _yw['w_must']     = st.number_input("Must-Go-With Penalty",          value=_yw['w_must'],     step=10000, key="yw_must")
             _yw['w_sep']      = st.number_input("Can't-Go-With Penalty",         value=_yw['w_sep'],      step=10000, key="yw_sep")
             _yw['sg_friend']  = st.number_input("Sub-group Friend Reward",       value=_yw['sg_friend'],  step=50,    key="yw_sg_friend")
+            st.markdown("**Gender Balance**")
+            _yw['w_gender_sole']    = st.number_input("Sole gender in group (1 of a gender) — Penalty",    value=_yw.get('w_gender_sole',    150000), step=10000, key="yw_g_sole")
+            _yw['w_gender_duo']     = st.number_input("Duo gender in group (2 of a gender) — Penalty",     value=_yw.get('w_gender_duo',      30000), step=5000,  key="yw_g_duo")
+            _yw['w_gender_allsame'] = st.number_input("All same gender in group — Penalty",                value=_yw.get('w_gender_allsame',   8000), step=1000,  key="yw_g_allsame")
             if st.button("↩️ Reset to Defaults", key="y9_reset_wts"):
                 st.session_state.y9_weights = Y9_DEFAULT_WEIGHTS.copy(); st.rerun()
 
@@ -1495,12 +1518,25 @@ elif page == "🏔️ Y9 Journey Groups":
 
         # ── Save Your Setup ───────────────────────────────────────────────────────────────
         st.sidebar.header("💾 Save Your Setup")
+        _na_details = []
+        for _na_name in st.session_state.y9_na:
+            _na_row = df_y9[df_y9['Official Name'] == _na_name]
+            if not _na_row.empty:
+                _nr = _na_row.iloc[0]
+                _na_details.append({
+                    'name': _na_name,
+                    'student_id': str(_nr.get('Student ID', '')),
+                    'house': str(_nr.get('House_stud', '')),
+                    'email': str(_nr.get('Email', '')),
+                })
         _y9_save = {
             'sep':        [list(p) for p in st.session_state.y9_sep],
             'must':       [list(p) for p in st.session_state.y9_must],
             'force':      st.session_state.y9_force,
             'force_week': st.session_state.y9_force_week,
             'na':         st.session_state.y9_na,
+            'na_details': _na_details,
+            'include_drafts': st.session_state.y9_include_drafts,
             'weights':    st.session_state.y9_weights,
         }
         st.sidebar.download_button(
@@ -1610,7 +1646,7 @@ elif page == "🏔️ Y9 Journey Groups":
             return {k: Y9_CAMP_DEFS[k]['max_per'] * v for k, v in config.items()}
 
         def _optimize_assignment(week_df, config, caps, friend_reqs, forced,
-                                 must_pairs, sep_pairs, seed_str, depth):
+                                 must_pairs, sep_pairs, seed_str, depth, gender_lookup=None):
             """Phase 1: assign every student to a camp TYPE via hill-climbing."""
             active = list(config.keys())
             students = list(week_df['Official Name'])
@@ -1623,6 +1659,9 @@ elif page == "🏔️ Y9 Journey Groups":
             W_FORCE  = _yw.get('w_force',   1000000)
             W_MUST   = _yw.get('w_must',    1000000)
             W_SEP    = _yw.get('w_sep',     500000)
+            W_G_SOLE    = _yw.get('w_gender_sole',    150000)
+            W_G_DUO     = _yw.get('w_gender_duo',      30000)
+            W_G_ALLSAME = _yw.get('w_gender_allsame',   8000)
 
             def _score(asgn):
                 s = 0
@@ -1641,6 +1680,21 @@ elif page == "🏔️ Y9 Journey Groups":
                     if _a in asgn and _b in asgn and asgn[_a] != asgn[_b]: s -= W_MUST
                 for _a, _b in sep_pairs:
                     if _a in asgn and _b in asgn and asgn[_a] == asgn[_b]: s -= W_SEP
+                # Gender balance per camp
+                if gender_lookup:
+                    for _camp in active:
+                        _members = [st for st, c in asgn.items() if c == _camp]
+                        _m = sum(1 for st in _members if gender_lookup.get(st, 'o') == 'm')
+                        _f = sum(1 for st in _members if gender_lookup.get(st, 'o') == 'f')
+                        # All same gender (no mix): light penalty
+                        if _m == 0 and _f > 0: s -= W_G_ALLSAME
+                        elif _f == 0 and _m > 0: s -= W_G_ALLSAME
+                        else:
+                            # Mixed: penalise lone or duo of either gender
+                            if _m == 1: s -= W_G_SOLE
+                            elif _m == 2: s -= W_G_DUO
+                            if _f == 1: s -= W_G_SOLE
+                            elif _f == 2: s -= W_G_DUO
                 return s
 
             if "Fast" in depth:   restarts, iters = 30,  2000
@@ -1682,7 +1736,7 @@ elif page == "🏔️ Y9 Journey Groups":
 
             return best_asgn
 
-        def _split_subgroups(camp_students, max_per, friend_reqs, seed_str):
+        def _split_subgroups(camp_students, max_per, friend_reqs, seed_str, gender_lookup=None):
             """Phase 2: split a camp's student list into sub-groups A and B."""
             students = list(camp_students)
             n = len(students)
@@ -1693,6 +1747,9 @@ elif page == "🏔️ Y9 Journey Groups":
             SG_BAL    = _yw.get('sg_balance', 15)
             SG_CAP    = _yw.get('sg_cap',     600000)
             SG_FRIEND = _yw.get('sg_friend',  400)
+            SG_G_SOLE    = _yw.get('w_gender_sole',    150000) // 2
+            SG_G_DUO     = _yw.get('w_gender_duo',      30000) // 2
+            SG_G_ALLSAME = _yw.get('w_gender_allsame',   8000) // 2
 
             def _sg_score(a, b):
                 s = -(abs(len(a) - len(b)) ** 2) * SG_BAL
@@ -1704,6 +1761,19 @@ elif page == "🏔️ Y9 Journey Groups":
                 for _st in b:
                     for _f in friend_reqs.get(_st, []):
                         if _f in b: s += SG_FRIEND
+                # Gender balance per subgroup
+                if gender_lookup:
+                    for _grp in [a, b]:
+                        if len(_grp) == 0: continue
+                        _m = sum(1 for st in _grp if gender_lookup.get(st, 'o') == 'm')
+                        _f = sum(1 for st in _grp if gender_lookup.get(st, 'o') == 'f')
+                        if _m == 0 and _f > 0: s -= SG_G_ALLSAME
+                        elif _f == 0 and _m > 0: s -= SG_G_ALLSAME
+                        else:
+                            if _m == 1: s -= SG_G_SOLE
+                            elif _m == 2: s -= SG_G_DUO
+                            if _f == 1: s -= SG_G_SOLE
+                            elif _f == 2: s -= SG_G_DUO
                 return s
 
             random.seed(seed_str)
@@ -1732,7 +1802,7 @@ elif page == "🏔️ Y9 Journey Groups":
         all_friend_reqs   = {}
 
         for _wk, _wk_label in [(1, "Week 1 (Unwin & Hodgkin)"), (2, "Week 2 (Mather & Ransome)")]:
-            _wdf = df_y9_act[df_y9_act['Week'] == _wk].copy()
+            _wdf = df_y9_opt[df_y9_opt['Week'] == _wk].copy()
 
             # Apply force-week overrides: students whose home week differs from _wk
             # but have been explicitly forced into this week are added here;
@@ -1786,7 +1856,11 @@ elif page == "🏔️ Y9 Journey Groups":
                 'force_week': sorted(_force_week_rules.items()),
                 'sep':   sorted([tuple(sorted(p)) for p in _sep_wk]),
                 'must':  sorted([tuple(sorted(p)) for p in _must_wk]),
-                'seed': st.session_state.y9_seed, 'depth': y9_depth, 'n': len(_wdf)
+                'seed': st.session_state.y9_seed, 'depth': y9_depth, 'n': len(_wdf),
+                'drafts': y9_include_drafts,
+                'g_sole': st.session_state.y9_weights.get('w_gender_sole', 150000),
+                'g_duo':  st.session_state.y9_weights.get('w_gender_duo',   30000),
+                'g_all':  st.session_state.y9_weights.get('w_gender_allsame', 8000),
             })
 
             if st.session_state.y9_states.get(_wk) != _state_key:
@@ -1795,10 +1869,12 @@ elif page == "🏔️ Y9 Journey Groups":
 
             if _wk not in st.session_state.y9_results:
                 with st.spinner(f"⚙️ Optimising {_wk_label} — {len(_wdf)} students across {sum(_config.values())} camps…"):
+                    _gender_lk = dict(zip(_wdf['Official Name'], _wdf['Gender']))
                     _asgn = _optimize_assignment(
                         _wdf, _config, _caps, _wfr,
                         _forced_wk, _must_wk, _sep_wk,
-                        f"y9_w{_wk}_{st.session_state.y9_seed}", y9_depth
+                        f"y9_w{_wk}_{st.session_state.y9_seed}", y9_depth,
+                        gender_lookup=_gender_lk
                     )
 
                 _week_groups = {}
@@ -1810,7 +1886,8 @@ elif page == "🏔️ Y9 Journey Groups":
                     else:
                         _ga, _gb = _split_subgroups(
                             _camp_list, _mp, _wfr,
-                            f"split_{_ck}_w{_wk}_{st.session_state.y9_seed}")
+                            f"split_{_ck}_w{_wk}_{st.session_state.y9_seed}",
+                            gender_lookup=_gender_lk)
                         _week_groups[_ck] = {'A': _ga, 'B': _gb}
 
                 st.session_state.y9_results[_wk] = _week_groups
@@ -1968,12 +2045,16 @@ elif page == "🏔️ Y9 Journey Groups":
                                 if _rows:
                                     _df_sg = pd.DataFrame(_rows)
 
-                                    def _hl_y9(row, df_ref, wk, ck, find_name, fl):
+                                    def _hl_y9(row, df_ref, wk, ck, find_name, fl, include_drafts=False):
                                         colors = [''] * len(row)
                                         if row['Student'] == find_name:
                                             return ['background-color: #85e085; font-weight: bold; color: black'] * len(row)
                                         if row['Responded'] == 'No':
-                                            colors[df_ref.columns.get_loc('Responded')] = 'background-color: #ffffcc'
+                                            if include_drafts:
+                                                # Draft student — full grey row
+                                                return ['background-color: #d9d9d9; color: #555; font-style: italic'] * len(row)
+                                            else:
+                                                colors[df_ref.columns.get_loc('Responded')] = 'background-color: #ffffcc'
 
                                         # Pref rank colouring
                                         _pr_idx = df_ref.columns.get_loc('Pref Rank')
@@ -2021,7 +2102,8 @@ elif page == "🏔️ Y9 Journey Groups":
 
                                     _styled = _df_sg.style.apply(
                                         _hl_y9, df_ref=_df_sg, wk=_wk, ck=_ck,
-                                        find_name=y9_find, fl=full_lookup, axis=1)
+                                        find_name=y9_find, fl=full_lookup,
+                                        include_drafts=y9_include_drafts, axis=1)
                                     st.dataframe(_styled, hide_index=True, use_container_width=True)
 
                                     _sheet_nm = f"{_ck}{'_'+_sg if _has_b else ''}_W{_wk}"[:31]
@@ -2033,7 +2115,7 @@ elif page == "🏔️ Y9 Journey Groups":
 
             # ── DASHBOARDS ────────────────────────────────────────────────────────────────
             st.markdown("---")
-            _dcol1, _dcol2 = st.columns(2)
+            _dcol1, _dcol2, _dcol3 = st.columns(3)
             with _dcol1:
                 st.write("### ⚠️ At Risk of Isolation")
                 st.caption("Students whose requested friend ended up in a different camp.")
@@ -2044,16 +2126,36 @@ elif page == "🏔️ Y9 Journey Groups":
 
             with _dcol2:
                 st.write("### ❌ Missing Responses")
+                # Use the full active pool (df_y9_act) so missing responses always appear
+                # regardless of draft-mode setting
                 _miss_y9 = df_y9_act[~df_y9_act['Responded']][
-                    ['Student ID', 'Official Name', 'House_stud']].copy()
+                    ['Student ID', 'Official Name', 'Email', 'House_stud']].copy()
                 _miss_y9.rename(columns={'Official Name': 'Student', 'House_stud': 'House'}, inplace=True)
                 _miss_y9['House'] = _miss_y9['House'].str.title()
                 if not _miss_y9.empty:
-                    st.dataframe(_miss_y9, hide_index=True, use_container_width=True)
+                    st.dataframe(_miss_y9[['Student ID', 'Student', 'House']], hide_index=True, use_container_width=True)
+                    st.write(f"**{len(_miss_y9)} student(s) yet to respond**")
+                    _email_list = ', '.join(
+                        e for e in _miss_y9['Email'].dropna().tolist()
+                        if e and e.lower() not in ('', 'nan', 'none'))
+                    if _email_list:
+                        st.write("**📧 Email list (copy & paste into BCC):**")
+                        st.code(_email_list, language=None)
                 else:
                     st.success("✅ Everyone has responded!")
 
-            # ── EXCEL EXPORT ──────────────────────────────────────────────────────────────
+            with _dcol3:
+                st.write("### 🚫 Not Attending")
+                st.caption("Students marked as not attending this camp.")
+                if _y9_na:
+                    _na_display = df_y9[df_y9['Official Name'].isin(_y9_na)][
+                        ['Student ID', 'Official Name', 'House_stud']].copy()
+                    _na_display.rename(columns={'Official Name': 'Student', 'House_stud': 'House'}, inplace=True)
+                    _na_display['House'] = _na_display['House'].str.title()
+                    st.dataframe(_na_display, hide_index=True, use_container_width=True)
+                    st.write(f"**{len(_y9_na)} student(s) not attending**")
+                else:
+                    st.info("No students marked as not attending.")
             if _export_sheets:
                 st.markdown("---")
                 _y9_out = io.BytesIO()
