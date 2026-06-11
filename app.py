@@ -22,7 +22,7 @@ students_file  = st.sidebar.file_uploader("Student List (CSV)",      type=["csv"
 # ── Tool selection comes FIRST so Y8 processing can be gated by page ─────────
 st.sidebar.markdown("---")
 st.sidebar.header("🎯 2. Select Tool")
-page = st.sidebar.radio("Select tool", ["🏕️ Y8 Group Creator", "🏔️ Y9 Journey Groups", "📋 Final Roster & Leader Builder"], label_visibility="collapsed")
+page = st.sidebar.radio("Select tool", ["🏕️ Y8 Group Creator", "🏔️ Y9 Journey Groups", "📋 Final Roster & Leader Builder", "🔍 Y9 Free Text Analyser"], label_visibility="collapsed")
 
 # ── Y8 global data processing (only when a Y8 tool is active) ────────────────
 df_merged_full = None
@@ -2667,3 +2667,732 @@ elif page == "🏔️ Y9 Journey Groups":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
+
+# =========================================================================================
+# ========================= PAGE 4: Y9 FREE TEXT ANALYSER =================================
+# =========================================================================================
+elif page == "🔍 Y9 Free Text Analyser":
+
+    # ── Constants ─────────────────────────────────────────────────────────────────────────
+    # Swap this string to change the model. Must already be downloaded to
+    # ~/.cache/huggingface/hub/ or will auto-download on first run (~5 GB).
+    _FT_MODEL_ID = "FakeRockert543/gemma-4-e4b-it-MLX-4bit"
+    _FT_COL = "Is there anything else we should know when considering your preferences?"
+    _FT_TRIVIAL = {
+        "no", "nah", "nar", "no thank you", "not really", "n/a", "none",
+        "i don't think so", "nothing", "no.", "no!", "nope", "na", "nil",
+        "not that i can think of", "nothing else", "nothing really", "nope!"
+    }
+    _FT_SYSTEM_PROMPT = """You are a data extraction assistant for a school camp preference survey.
+Analyse the student response and return ONLY a valid JSON object with the
+fields below. Never invent information not present in the text. If a field
+does not apply, use "" or [].
+
+{
+  "flags": [],
+  "extra_friends": [],
+  "tent_notes": "",
+  "medical_notes": "",
+  "permission_notes": "",
+  "preference_notes": "",
+  "concern_notes": "",
+  "equipment_notes": "",
+  "logistics_notes": "",
+  "other_notes": "",
+  "is_irrelevant": false
+}
+
+flags is an array from: ["friend_request", "tent_request", "medical", "permission",
+"preference", "concern", "equipment", "logistics", "irrelevant"]
+
+extra_friends: names the student mentions wanting to be WITH, beyond their formal
+friend-request field entries. Strings only. Do not include names only mentioned
+in the context of tent arrangements.
+
+tent_notes: specific tent arrangements: own tent, shared tent with named people,
+tents adjacent, group of 3 in one tent. Different from just wanting to be with
+someone socially.
+
+medical_notes: injuries, conditions, medications, allergies, physical limitations.
+
+permission_notes: staff have approved an exception — cross-house, specific group
+placement, week override.
+
+preference_notes: camp or activity preferences expressed in text beyond the formal
+ranking (e.g. "really wants MTB", "wants Dougie's camp", "wants water-based option").
+
+concern_notes: anxiety, nervousness, conditional attendance ("won't go if...",
+"not sure I'm going").
+
+equipment_notes: personal equipment: own tent, own bike, etc.
+
+logistics_notes: scheduling or availability issues (not available week 1, going
+different week to house, etc.).
+
+other_notes: anything else relevant to camp staff.
+
+is_irrelevant: true if response has NO actionable info for staff e.g. "I like
+fishing", "I'm excited", "I like music"
+
+Return ONLY the JSON object. No explanation. No markdown. No other text."""
+
+    # ── Dependency check ──────────────────────────────────────────────────────────────────
+    _ft_mlx_ok = False
+    _ft_rf_ok  = False
+    try:
+        from mlx_lm import load as _mlx_load, generate as _mlx_generate
+        _ft_mlx_ok = True
+    except ImportError:
+        st.warning(
+            "mlx-lm is not installed. Run: `pip install --upgrade mlx-lm`\n\n"
+            "This tool requires an Apple Silicon Mac. The model (~5 GB) will download "
+            "automatically to `~/.cache/huggingface/hub/` on first use."
+        )
+    try:
+        from rapidfuzz import process as _rf_process, fuzz as _rf_fuzz
+        _ft_rf_ok = True
+    except ImportError:
+        st.warning("rapidfuzz is not installed. Run: `pip install rapidfuzz`")
+
+    # ── Session state init ─────────────────────────────────────────────────────────────────
+    for _ftk, _ftv in [
+        ("y9_ft_results",         []),
+        ("y9_ft_analysed",        False),
+        ("y9_ft_new_must",        []),
+        ("y9_ft_new_force_week",  {}),
+        ("y9_ft_noted_list",      []),   # list of (email, category) tuples
+        ("y9_ft_friend_dec",      {}),   # (email, raw_nm) -> {action, resolved}
+        ("y9_ft_perm_dec",        {}),   # (email, 'perm') -> {type, ...}
+        ("y9_ft_model",           None),
+        ("y9_ft_tokenizer",       None),
+    ]:
+        if _ftk not in st.session_state:
+            st.session_state[_ftk] = _ftv
+
+    # ── Sidebar: existing rules uploader (page-gated) ─────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.header("📂 FT Analyser: Existing Rules")
+    _ft_rules_upload = st.sidebar.file_uploader(
+        "Load Existing Y9 Rules JSON (optional)",
+        type=["json"], key="y9_ft_rules_upload"
+    )
+
+    # ── Title ─────────────────────────────────────────────────────────────────────────────
+    st.title("🔍 Y9 Free Text Analyser")
+    st.caption(
+        "Pre-processing tool — runs the AI over free-text survey responses, "
+        "surfaces actionable items for review, and exports a combined rules JSON "
+        "ready for the Y9 Journey Groups tool."
+    )
+
+    # ── Data check ────────────────────────────────────────────────────────────────────────
+    if not (responses_file and students_file):
+        st.info("👈 Upload both CSV files using **Step 1 — Core Data Upload** in the sidebar to begin.")
+        st.stop()
+
+    # ── Load & clean data ─────────────────────────────────────────────────────────────────
+    responses_file.seek(0); students_file.seek(0)
+    _ft_df_s = pd.read_csv(students_file)
+    _ft_df_p = pd.read_csv(responses_file)
+
+    _ft_df_s["Email"] = _ft_df_s["Email"].astype(str).str.strip().str.lower()
+    _ft_df_s["Official Name"] = (
+        _ft_df_s["Preferred name"].astype(str).str.strip()
+        + " " + _ft_df_s["Surname"].astype(str).str.strip()
+    )
+
+    # House / week
+    _ft_full_houses  = ["unwin", "hodgkin", "mather", "ransome"]
+    _ft_letter_map   = {"u": "unwin", "h": "hodgkin", "m": "mather", "r": "ransome"}
+    _ft_house_col_s  = next((c for c in _ft_df_s.columns if c.strip().lower() == "house"), None)
+    _ft_rg_col       = next((c for c in _ft_df_s.columns if "rollgroup" in c.lower()), None)
+
+    def _ft_house_from_rg(val):
+        v = str(val).strip().lower()
+        for h in _ft_full_houses:
+            if h in v: return h
+        for ch in ([v[0], v[-1]] if len(v) > 1 else [v[0]] if v else []):
+            if ch in _ft_letter_map: return _ft_letter_map[ch]
+        return ""
+
+    if _ft_house_col_s:
+        _ft_df_s["House"] = _ft_df_s[_ft_house_col_s].astype(str).str.strip().str.lower()
+    elif _ft_rg_col:
+        _ft_df_s["House"] = _ft_df_s[_ft_rg_col].apply(_ft_house_from_rg)
+    else:
+        _ft_df_s["House"] = ""
+
+    _FT_HOUSE_WEEK = {"unwin": 1, "hodgkin": 1, "mather": 2, "ransome": 2}
+    _ft_df_s["Week"] = _ft_df_s["House"].map(_FT_HOUSE_WEEK)
+
+    _ft_df_p["Email address"] = _ft_df_p["Email address"].astype(str).str.strip().str.lower()
+
+    _ft_df = pd.merge(
+        _ft_df_s[["Email", "Official Name", "House", "Week"]],
+        _ft_df_p, left_on="Email", right_on="Email address", how="left"
+    )
+    _ft_df["Responded"] = _ft_df["Email address"].notna()
+
+    _ft_official_names = sorted(_ft_df_s["Official Name"].dropna().unique().tolist())
+
+    # Formal friend columns
+    _ft_friend_cols = [c for c in _ft_df_p.columns if "suggest one person" in c.lower()]
+
+    # Build formal friend lookup: name -> [formally requested official names]
+    def _ft_get_formal_friends_for(row):
+        out = []
+        if pd.isna(row.get("Email address")): return out
+        for _fc in _ft_friend_cols:
+            val = row.get(_fc)
+            if not (pd.notna(val) and isinstance(val, str) and val.strip()): continue
+            val_s = val.strip()
+            # exact then case-insensitive match
+            if val_s in _ft_official_names and val_s not in out:
+                out.append(val_s); continue
+            for nm in _ft_official_names:
+                if val_s.lower() == nm.lower() and nm not in out:
+                    out.append(nm); break
+        return out
+
+    _ft_formal_friends = {}
+    for _, _rw in _ft_df.iterrows():
+        _ft_formal_friends[_rw["Official Name"]] = _ft_get_formal_friends_for(_rw)
+
+    def _ft_is_already_mutual(name_a, name_b):
+        return (name_b in _ft_formal_friends.get(name_a, [])
+                and name_a in _ft_formal_friends.get(name_b, []))
+
+    # Locate free-text column
+    _ft_col_actual = next(
+        (c for c in _ft_df_p.columns if "anything else we should know" in c.lower()),
+        None
+    )
+
+    # Pre-filter: build list of rows with non-trivial free text
+    def _ft_is_trivial(text):
+        if pd.isna(text): return True
+        t = str(text).strip()
+        if not t: return True
+        if t.lower() in _FT_TRIVIAL: return True
+        if all(ch in ".,!?;: \t\n-" for ch in t): return True
+        return False
+
+    _ft_rows_to_analyse = []
+    if _ft_col_actual:
+        for _, _rw in _ft_df.iterrows():
+            _txt = _rw.get(_ft_col_actual)
+            if not _ft_is_trivial(_txt):
+                _ft_rows_to_analyse.append({
+                    "email": _rw["Email"],
+                    "name":  _rw["Official Name"],
+                    "house": str(_rw.get("House", "") or "").title(),
+                    "week":  _rw.get("Week"),
+                    "text":  str(_txt).strip(),
+                })
+    else:
+        st.error(f"Could not find the free-text column. Expected to contain: \"anything else we should know\"")
+
+    # Metrics
+    _ft_total_resp = int(_ft_df["Responded"].sum())
+    _ft_n_analyse  = len(_ft_rows_to_analyse)
+    _ft_n_trivial  = _ft_total_resp - _ft_n_analyse
+
+    _mc1, _mc2, _mc3 = st.columns(3)
+    _mc1.metric("Total responses", _ft_total_resp)
+    _mc2.metric("Free text to analyse", _ft_n_analyse)
+    _mc3.metric("Trivial / blank (skipped)", _ft_n_trivial)
+
+    st.markdown("---")
+
+    # ── Analyse / Reset buttons ───────────────────────────────────────────────────────────
+    _ft_btn_col, _ft_rst_col = st.columns([3, 1])
+    with _ft_btn_col:
+        _ft_analyse_clicked = st.button(
+            "🔬 Analyse Free-Text Responses",
+            disabled=(not _ft_mlx_ok) or (not _ft_rf_ok) or st.session_state.y9_ft_analysed,
+            use_container_width=True,
+            type="primary",
+            key="y9_ft_analyse_btn"
+        )
+    with _ft_rst_col:
+        _ft_reset_clicked = st.button(
+            "🗑️ Reset",
+            use_container_width=True,
+            disabled=not st.session_state.y9_ft_analysed,
+            key="y9_ft_reset_btn"
+        )
+
+    if _ft_reset_clicked:
+        for _rk in ["y9_ft_results", "y9_ft_new_must", "y9_ft_new_force_week",
+                    "y9_ft_noted_list", "y9_ft_friend_dec", "y9_ft_perm_dec"]:
+            st.session_state[_rk] = [] if _rk in ("y9_ft_results", "y9_ft_new_must", "y9_ft_noted_list") else {}
+        st.session_state.y9_ft_analysed = False
+        st.rerun()
+
+    # ── Analysis execution ────────────────────────────────────────────────────────────────
+    if _ft_analyse_clicked and _ft_mlx_ok and _ft_rf_ok:
+
+        # Load model once into session state
+        if st.session_state.y9_ft_model is None:
+            with st.spinner(f"⏳ Loading AI model — {_FT_MODEL_ID} (first load may take ~30 s)…"):
+                _m, _t = _mlx_load(_FT_MODEL_ID)
+                st.session_state.y9_ft_model = _m
+                st.session_state.y9_ft_tokenizer = _t
+
+        _ft_model     = st.session_state.y9_ft_model
+        _ft_tokenizer = st.session_state.y9_ft_tokenizer
+        _ft_results   = []
+        _ft_n         = len(_ft_rows_to_analyse)
+        _ft_prog      = st.progress(0, text="Starting analysis…")
+
+        for _fi, _frow in enumerate(_ft_rows_to_analyse):
+            _ft_prog.progress(
+                _fi / max(_ft_n, 1),
+                text=f"Analysing response {_fi + 1} of {_ft_n} — {_frow['name']}…"
+            )
+
+            _messages = [
+                {"role": "system", "content": _FT_SYSTEM_PROMPT},
+                {"role": "user",   "content": f"Student response:\n\n{_frow['text']}"}
+            ]
+
+            try:
+                if hasattr(_ft_tokenizer, "apply_chat_template"):
+                    _prompt_str = _ft_tokenizer.apply_chat_template(
+                        _messages, tokenize=False, add_generation_prompt=True
+                    )
+                else:
+                    _prompt_str = f"{_FT_SYSTEM_PROMPT}\n\nStudent response:\n\n{_frow['text']}"
+
+                _raw = _mlx_generate(
+                    _ft_model, _ft_tokenizer,
+                    prompt=_prompt_str, max_tokens=800, verbose=False
+                )
+
+                # Strip accidental markdown fences
+                _clean = _raw.strip()
+                if _clean.startswith("```"):
+                    _clean = re.sub(r"^```(?:json)?\s*", "", _clean)
+                    _clean = re.sub(r"\s*```$", "", _clean).strip()
+                # Trim after closing brace
+                _close = _clean.rfind("}")
+                if _close != -1:
+                    _clean = _clean[:_close + 1]
+
+                _llm_result = json.loads(_clean)
+
+                # Fuzzy-match extra_friends
+                _name_matches = {}
+                for _raw_nm in (_llm_result.get("extra_friends") or []):
+                    _hits = _rf_process.extract(
+                        str(_raw_nm), _ft_official_names,
+                        scorer=_rf_fuzz.token_sort_ratio, limit=3
+                    )
+                    _name_matches[_raw_nm] = [(nm, sc) for nm, sc, _ in _hits if sc >= 65]
+
+                _ft_results.append({
+                    "email": _frow["email"], "name": _frow["name"],
+                    "house": _frow["house"], "week": _frow["week"],
+                    "text":  _frow["text"],  "llm":  _llm_result,
+                    "name_matches": _name_matches, "error": False,
+                })
+
+            except Exception as _ex:
+                _ft_results.append({
+                    "email": _frow["email"], "name": _frow["name"],
+                    "house": _frow["house"], "week": _frow["week"],
+                    "text":  _frow["text"],  "llm":  {},
+                    "name_matches": {}, "error": True, "error_msg": str(_ex),
+                })
+
+        _ft_prog.progress(1.0, text="✅ Analysis complete!")
+        st.session_state.y9_ft_results  = _ft_results
+        st.session_state.y9_ft_analysed = True
+        st.rerun()
+
+    # ── Review queue ──────────────────────────────────────────────────────────────────────
+    if st.session_state.y9_ft_analysed and st.session_state.y9_ft_results:
+
+        _ft_res_all   = st.session_state.y9_ft_results
+        _ft_actionable = [r for r in _ft_res_all
+                          if not r["error"] and not r["llm"].get("is_irrelevant", False)]
+        _ft_errors     = [r for r in _ft_res_all if r["error"]]
+
+        # Sort: medical → permission → friend/tent → concern → other
+        def _ft_sort_key(r):
+            _fl = set(r["llm"].get("flags", []))
+            if "medical"    in _fl: return 0
+            if "permission" in _fl: return 1
+            if "friend_request" in _fl or "tent_request" in _fl: return 2
+            if "concern"    in _fl: return 3
+            return 4
+
+        _ft_actionable.sort(key=_ft_sort_key)
+
+        # Summary bar
+        _ft_noted_set  = set(tuple(x) for x in st.session_state.y9_ft_noted_list)
+        _ft_n_must     = len(st.session_state.y9_ft_new_must)
+        _ft_n_med_noted = sum(1 for (_, cat) in _ft_noted_set if cat in ("Medical", "Concern"))
+        _ft_n_cards    = len(_ft_actionable)
+        _ft_n_irrel    = len([r for r in _ft_res_all if not r["error"] and r["llm"].get("is_irrelevant", False)])
+
+        _sb1, _sb2, _sb3, _sb4 = st.columns(4)
+        _sb1.metric("Cards with actionable content", _ft_n_cards)
+        _sb2.metric("New Must-Go rules ready", _ft_n_must)
+        _sb3.metric("Medical / Concern flags noted", _ft_n_med_noted)
+        _sb4.metric("Irrelevant responses (skipped)", _ft_irrel if (_ft_irrel := _ft_n_irrel) else 0)
+
+        st.markdown("---")
+        st.subheader("📋 Review Queue")
+
+        _FT_FLAG_EMOJI = {
+            "friend_request": "🟠 Friend request",
+            "tent_request":   "🔵 Tent",
+            "medical":        "🔴 Medical",
+            "permission":     "🟡 Permission",
+            "preference":     "🟢 Preference",
+            "concern":        "🟣 Concern",
+            "equipment":      "⚪ Equipment",
+            "logistics":      "⚪ Logistics",
+            "irrelevant":     "— Irrelevant",
+        }
+
+        for _fi, _fres in enumerate(_ft_actionable):
+            _fl = _fres["llm"].get("flags", [])
+            _fl_labels = "  ".join(_FT_FLAG_EMOJI.get(f, f) for f in _fl if f != "irrelevant")
+            _card_label = f"**{_fres['name']}**  —  {_fl_labels}" if _fl_labels else _fres["name"]
+            _expand_default = "medical" in _fl or "concern" in _fl
+
+            with st.expander(_card_label, expanded=_expand_default):
+                st.info(f"📝 **Original response:** {_fres['text']}")
+                _ll = _fres["llm"]
+
+                # ── Extra friend requests ──────────────────────────────────────────────────
+                _extra_friends = _ll.get("extra_friends") or []
+                if _extra_friends:
+                    st.markdown("**🟠 Extra friend mentions (beyond formal fields):**")
+                    for _raw_nm in _extra_friends:
+                        _matches  = _fres["name_matches"].get(_raw_nm, [])
+                        _dec_key  = (_fres["email"], _raw_nm)
+                        _decision = st.session_state.y9_ft_friend_dec.get(_dec_key)
+
+                        if _decision:
+                            if _decision["action"] == "accept":
+                                st.success(f"✅ **{_raw_nm}** → Must-Go rule added: **{_fres['name']}** + **{_decision['resolved']}**")
+                            else:
+                                st.warning(f"❌ **{_raw_nm}** — Dismissed")
+                            continue
+
+                        # Check mutual against top match
+                        _top_match = _matches[0][0] if _matches else None
+                        if _top_match and _ft_is_already_mutual(_fres["name"], _top_match):
+                            st.success(f"✅ **{_raw_nm}** → Already captured in formal fields (mutual: {_fres['name']} ↔ {_top_match})")
+                            continue
+
+                        _safe = re.sub(r"\W+", "_", _raw_nm)[:18]
+                        _sel_key     = f"y9_ft_sel_{_fi}_{_safe}"
+                        _accept_key  = f"y9_ft_acc_{_fi}_{_safe}"
+                        _dismiss_key = f"y9_ft_dis_{_fi}_{_safe}"
+
+                        st.markdown(f"*Extracted name:* `{_raw_nm}`")
+                        _sc_a, _sc_b = st.columns([3, 2])
+                        with _sc_a:
+                            if _matches:
+                                _opts = [m[0] for m in _matches] + ["— not listed —"]
+                                _scores = {m[0]: m[1] for m in _matches}
+                                st.selectbox(
+                                    f"Best matches for \"{_raw_nm}\":",
+                                    _opts,
+                                    format_func=lambda n: f"{n} ({_scores[n]:.0f}%)" if n in _scores else n,
+                                    key=_sel_key
+                                )
+                            else:
+                                st.caption(f"No confident match for \"{_raw_nm}\" — search manually:")
+                                st.selectbox(
+                                    "Search roster:",
+                                    ["— not listed —"] + _ft_official_names,
+                                    key=_sel_key
+                                )
+                        with _sc_b:
+                            _bca, _bcb = st.columns(2)
+                            if _bca.button("✅ Must-Go", key=_accept_key, use_container_width=True):
+                                _resolved = st.session_state.get(_sel_key, "")
+                                if _resolved and _resolved != "— not listed —":
+                                    _pair     = (_fres["name"], _resolved)
+                                    _rev_pair = (_resolved, _fres["name"])
+                                    _existing = [(a, b) for (a, b) in st.session_state.y9_ft_new_must]
+                                    if _pair not in _existing and _rev_pair not in _existing:
+                                        st.session_state.y9_ft_new_must.append(_pair)
+                                    st.session_state.y9_ft_friend_dec[_dec_key] = {
+                                        "action": "accept", "resolved": _resolved
+                                    }
+                                    st.rerun()
+                            if _bcb.button("❌ Dismiss", key=_dismiss_key, use_container_width=True):
+                                st.session_state.y9_ft_friend_dec[_dec_key] = {
+                                    "action": "dismiss", "resolved": None
+                                }
+                                st.rerun()
+
+                # ── Tent notes ────────────────────────────────────────────────────────────
+                if _tent := (_ll.get("tent_notes") or "").strip():
+                    st.markdown("**🔵 Tent note:**")
+                    st.write(_tent)
+
+                # ── Medical notes ─────────────────────────────────────────────────────────
+                if _med := (_ll.get("medical_notes") or "").strip():
+                    st.markdown("**🔴 Medical:**")
+                    st.write(_med)
+                    _mnote_key = (_fres["email"], "Medical")
+                    if _mnote_key in _ft_noted_set:
+                        st.success("✅ Noted")
+                    else:
+                        if st.button("✅ Noted", key=f"y9_ft_med_{_fi}"):
+                            st.session_state.y9_ft_noted_list.append(list(_mnote_key))
+                            st.rerun()
+
+                # ── Permission notes ──────────────────────────────────────────────────────
+                if _perm := (_ll.get("permission_notes") or "").strip():
+                    st.markdown("**🟡 Permission:**")
+                    st.write(_perm)
+                    _perm_key = (_fres["email"], "perm")
+                    _perm_dec = st.session_state.y9_ft_perm_dec.get(_perm_key)
+                    if _perm_dec:
+                        st.success(f"✅ {_perm_dec['type']}")
+                    else:
+                        st.caption("Choose the appropriate action:")
+                        _pmg_key  = f"y9_ft_perm_partner_{_fi}"
+                        _pfw_key  = f"y9_ft_perm_wk_{_fi}"
+                        _pc1, _pc2, _pc3 = st.columns([3, 2, 1])
+                        with _pc1:
+                            st.selectbox(
+                                "Must-Go with student:",
+                                ["— select —"] + _ft_official_names,
+                                key=_pmg_key, label_visibility="collapsed"
+                            )
+                            if st.button("✅ Add Must-Go Rule", key=f"y9_ft_pmg_{_fi}", use_container_width=True):
+                                _partner = st.session_state.get(_pmg_key, "")
+                                if _partner and _partner != "— select —":
+                                    _pair     = (_fres["name"], _partner)
+                                    _rev_pair = (_partner, _fres["name"])
+                                    _existing = list(st.session_state.y9_ft_new_must)
+                                    if _pair not in _existing and _rev_pair not in _existing:
+                                        st.session_state.y9_ft_new_must.append(_pair)
+                                    st.session_state.y9_ft_perm_dec[_perm_key] = {
+                                        "type": f"Must-Go: {_fres['name']} + {_partner}"
+                                    }
+                                    st.rerun()
+                        with _pc2:
+                            st.selectbox(
+                                "Force to Week:", [1, 2],
+                                format_func=lambda w: f"Week {w}",
+                                key=_pfw_key, label_visibility="collapsed"
+                            )
+                            if st.button("✅ Force-Week Override", key=f"y9_ft_pfw_{_fi}", use_container_width=True):
+                                _wk = int(st.session_state.get(_pfw_key, 1))
+                                st.session_state.y9_ft_new_force_week[_fres["name"]] = _wk
+                                st.session_state.y9_ft_perm_dec[_perm_key] = {
+                                    "type": f"Force to Week {_wk}"
+                                }
+                                st.rerun()
+                        with _pc3:
+                            if st.button("⏭️ Skip", key=f"y9_ft_pskip_{_fi}", use_container_width=True):
+                                st.session_state.y9_ft_perm_dec[_perm_key] = {"type": "No action"}
+                                st.rerun()
+
+                # ── Concern notes ─────────────────────────────────────────────────────────
+                if _concern := (_ll.get("concern_notes") or "").strip():
+                    st.markdown("**🟣 Concern:**")
+                    st.write(_concern)
+                    _cnote_key = (_fres["email"], "Concern")
+                    if _cnote_key in _ft_noted_set:
+                        st.success("✅ Noted")
+                    else:
+                        if st.button("✅ Noted", key=f"y9_ft_concern_{_fi}"):
+                            st.session_state.y9_ft_noted_list.append(list(_cnote_key))
+                            st.rerun()
+
+                # ── Read-only notes (flow to Staff Notes only) ────────────────────────────
+                for _note_field, _note_label in [
+                    ("preference_notes", "🟢 Preference"),
+                    ("equipment_notes",  "⚪ Equipment"),
+                    ("logistics_notes",  "⚪ Logistics"),
+                    ("other_notes",      "📝 Other"),
+                ]:
+                    if _note_val := (_ll.get(_note_field) or "").strip():
+                        st.markdown(f"**{_note_label}:**")
+                        st.write(_note_val)
+
+        # Error expander
+        if _ft_errors:
+            with st.expander(f"⚠️ {len(_ft_errors)} response(s) failed to parse — click to review"):
+                for _ferr in _ft_errors:
+                    st.warning(f"**{_ferr['name']}**: {_ferr.get('error_msg', 'Unknown error')}")
+                    st.write(f"Original text: _{_ferr['text']}_")
+
+        st.markdown("---")
+
+        # ── Exports ───────────────────────────────────────────────────────────────────────
+        st.subheader("📥 Exports")
+        _exp_c1, _exp_c2 = st.columns(2)
+
+        # ── Export 1: Combined Rules JSON ─────────────────────────────────────────────────
+        with _exp_c1:
+            st.markdown("**Export 1 — Combined Rules JSON**")
+            st.caption(
+                "Merges your accepted rules with any existing JSON. "
+                "Load the result directly into the Y9 Journey Groups tool."
+            )
+
+            _ft_base = {
+                "sep": [], "must": [], "force": {}, "force_week": {},
+                "na": [], "na_details": [], "include_drafts": False, "weights": {}
+            }
+            if _ft_rules_upload is not None:
+                try:
+                    _ft_rules_upload.seek(0)
+                    _loaded_rules = json.load(_ft_rules_upload)
+                    for _jk in _ft_base:
+                        if _jk in _loaded_rules:
+                            _ft_base[_jk] = _loaded_rules[_jk]
+                except Exception:
+                    st.warning("⚠️ Could not parse the uploaded rules JSON — starting from empty.")
+
+            # Append new must rules (deduplicated)
+            _existing_must_set = {tuple(sorted(p)) for p in _ft_base["must"]}
+            for _ma, _mb in st.session_state.y9_ft_new_must:
+                _pk = tuple(sorted([_ma, _mb]))
+                if _pk not in _existing_must_set:
+                    _ft_base["must"].append([_ma, _mb])
+                    _existing_must_set.add(_pk)
+
+            # Append force-week overrides (deduplicated / override existing)
+            for _fw_nm, _fw_wk in st.session_state.y9_ft_new_force_week.items():
+                _ft_base["force_week"][_fw_nm] = _fw_wk
+
+            st.download_button(
+                "📥 Export Combined Rules JSON",
+                data=json.dumps(_ft_base, indent=2).encode("utf-8"),
+                file_name="y9_camp_rules_combined.json",
+                mime="application/json",
+                use_container_width=True,
+                key="y9_ft_dl_json"
+            )
+
+            # Quick preview of new rules
+            if st.session_state.y9_ft_new_must or st.session_state.y9_ft_new_force_week:
+                with st.expander("Preview new rules being added"):
+                    if st.session_state.y9_ft_new_must:
+                        st.write("**New Must-Go pairs:**")
+                        for _ma, _mb in st.session_state.y9_ft_new_must:
+                            st.write(f"  • {_ma} + {_mb}")
+                    if st.session_state.y9_ft_new_force_week:
+                        st.write("**New Force-Week overrides:**")
+                        for _fn, _fw in st.session_state.y9_ft_new_force_week.items():
+                            st.write(f"  • {_fn} → Week {_fw}")
+
+        # ── Export 2: Staff Notes Excel ───────────────────────────────────────────────────
+        with _exp_c2:
+            st.markdown("**Export 2 — Staff Notes Excel**")
+            st.caption(
+                "One row per student per category. "
+                "Excludes pure friend requests and irrelevant responses."
+            )
+
+            _FT_NOTE_FIELDS = [
+                ("medical_notes",    "Medical"),
+                ("concern_notes",    "Concern"),
+                ("permission_notes", "Permission"),
+                ("tent_notes",       "Tent"),
+                ("preference_notes", "Preference"),
+                ("equipment_notes",  "Equipment"),
+                ("logistics_notes",  "Logistics"),
+                ("other_notes",      "Other"),
+            ]
+
+            _FT_CAT_STYLE = {
+                "Medical":    ("A83232", "FFFFFF"),
+                "Concern":    ("FF9933", "000000"),
+                "Permission": ("FFCC00", "000000"),
+                "Tent":       ("FF9900", "000000"),
+                "Preference": ("C8F7C5", "000000"),
+                "Equipment":  ("B5D4F4", "000000"),
+                "Logistics":  ("CECBF6", "000000"),
+                "Other":      ("D9D9D9", "000000"),
+            }
+
+            _ft_note_rows = []
+            for _fres in _ft_res_all:
+                if _fres["error"]: continue
+                if _fres["llm"].get("is_irrelevant", False): continue
+                _nm  = _fres["name"]
+                _hse = _fres.get("house", "") or ""
+                _wk  = _fres.get("week")
+                _wk_str = f"Week {int(_wk)}" if (_wk and not pd.isna(_wk)) else "Unknown"
+
+                for _fld, _cat in _FT_NOTE_FIELDS:
+                    _val = (_fres["llm"].get(_fld) or "").strip()
+                    if _val:
+                        _ft_note_rows.append({
+                            "Student":           _nm,
+                            "House":             _hse.title(),
+                            "Week":              _wk_str,
+                            "Category":          _cat,
+                            "Summary":           _val,
+                            "Original Response": _fres["text"],
+                        })
+
+            if _ft_note_rows:
+                _ft_wb  = Workbook()
+                _ft_ws  = _ft_wb.active
+                _ft_ws.title = "Staff Notes"
+
+                _ft_note_cols = ["Student", "House", "Week", "Category", "Summary", "Original Response"]
+
+                for _ci, _col in enumerate(_ft_note_cols, 1):
+                    _c = _ft_ws.cell(row=1, column=_ci, value=_col)
+                    _c.fill = PatternFill("solid", fgColor="4472C4")
+                    _c.font = Font(bold=True, color="FFFFFF")
+                    _c.alignment = Alignment(horizontal="center", vertical="center")
+
+                for _ri, _row in enumerate(_ft_note_rows, 2):
+                    for _ci, _col in enumerate(_ft_note_cols, 1):
+                        _c = _ft_ws.cell(row=_ri, column=_ci, value=_row[_col])
+                        _c.alignment = Alignment(wrap_text=True, vertical="top")
+
+                    _cat = _row["Category"]
+                    if _cat in _FT_CAT_STYLE:
+                        _fg, _fc = _FT_CAT_STYLE[_cat]
+                        _cat_c = _ft_ws.cell(row=_ri, column=4)
+                        _cat_c.fill = PatternFill("solid", fgColor=_fg)
+                        _cat_c.font = Font(bold=True, color=_fc)
+                        _cat_c.alignment = Alignment(horizontal="center", vertical="top")
+
+                # Column widths
+                _ft_col_widths = {
+                    "Student": 22, "House": 12, "Week": 10,
+                    "Category": 14, "Summary": 60, "Original Response": 60
+                }
+                for _ci, _col in enumerate(_ft_note_cols, 1):
+                    _ft_ws.column_dimensions[get_column_letter(_ci)].width = _ft_col_widths.get(_col, 20)
+
+                _ft_out = io.BytesIO()
+                _ft_wb.save(_ft_out)
+                _ft_out.seek(0)
+
+                st.download_button(
+                    "📥 Export Staff Notes (Excel)",
+                    data=_ft_out,
+                    file_name="Y9_Staff_Notes.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="y9_ft_dl_notes"
+                )
+                st.caption(f"{len(_ft_note_rows)} row(s) across {len(set(r['Student'] for r in _ft_note_rows))} student(s).")
+            else:
+                st.info("No staff notes to export — no relevant non-trivial content found yet.")
+
+    elif not st.session_state.y9_ft_analysed:
+        st.info(
+            "Click **🔬 Analyse Free-Text Responses** above to run the AI over the survey. "
+            "The model will be loaded from your local cache — no data leaves your Mac."
+        )
