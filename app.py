@@ -2673,6 +2673,17 @@ elif page == "🏔️ Y9 Journey Groups":
 # =========================================================================================
 elif page == "🔍 Y9 Free Text Analyser":
 
+    # ── MLX Metal stream initialisation ───────────────────────────────────────────────────
+    # Streamlit reruns scripts in worker threads that don't automatically get a Metal
+    # command-queue (stream).  Calling mx.eval() here creates one for the current thread
+    # before any model load or generate call, which prevents the
+    # "There is no Stream(gpu, 0) in current thread" crash.
+    try:
+        import mlx.core as _mx_core
+        _mx_core.eval(_mx_core.zeros([1]))   # warm-up: creates the Metal stream
+    except Exception:
+        pass
+
     # ── Constants ─────────────────────────────────────────────────────────────────────────
     # Swap this string to change the model. Must already be downloaded to
     # ~/.cache/huggingface/hub/ or will auto-download on first run (~5 GB).
@@ -2740,11 +2751,14 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
     _ft_mlx_ok = False
     _ft_rf_ok  = False
     try:
+        import mlx.core as _mx_core          # ensure stream exists before importing mlx_lm
+        _mx_core.eval(_mx_core.zeros([1]))
         from mlx_lm import load as _mlx_load, generate as _mlx_generate
         _ft_mlx_ok = True
-    except ImportError:
+    except Exception as _mlx_import_err:
         st.warning(
-            "mlx-lm is not installed. Run: `pip install --upgrade mlx-lm`\n\n"
+            f"mlx-lm could not be loaded ({_mlx_import_err}).\n\n"
+            "Run: `pip install --upgrade mlx-lm`\n\n"
             "This tool requires an Apple Silicon Mac. The model (~5 GB) will download "
             "automatically to `~/.cache/huggingface/hub/` on first use."
         )
@@ -2931,6 +2945,14 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
 
     # ── Analysis execution ────────────────────────────────────────────────────────────────
     if _ft_analyse_clicked and _ft_mlx_ok and _ft_rf_ok:
+
+        # Re-initialise the Metal stream for this thread before any MLX work.
+        # Streamlit may have re-used a different thread between reruns.
+        try:
+            import mlx.core as _mx_core
+            _mx_core.eval(_mx_core.zeros([1]))
+        except Exception:
+            pass
 
         # Load model once into session state
         if st.session_state.y9_ft_model is None:
