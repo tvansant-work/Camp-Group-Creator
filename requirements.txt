@@ -3,5 +3,5 @@ pandas
 networkx
 openpyxl
 pyobjc-framework-Cocoa
-mlx-lm
+mlx-lm==0.31.2
 rapidfuzz
