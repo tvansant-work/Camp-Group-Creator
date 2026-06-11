@@ -2673,21 +2673,13 @@ elif page == "🏔️ Y9 Journey Groups":
 # =========================================================================================
 elif page == "🔍 Y9 Free Text Analyser":
 
-    # ── MLX Metal stream initialisation ───────────────────────────────────────────────────
-    # Streamlit reruns scripts in worker threads that don't automatically get a Metal
-    # command-queue (stream).  Calling mx.eval() here creates one for the current thread
-    # before any model load or generate call, which prevents the
-    # "There is no Stream(gpu, 0) in current thread" crash.
-    try:
-        import mlx.core as _mx_core
-        _mx_core.eval(_mx_core.zeros([1]))   # warm-up: creates the Metal stream
-    except Exception:
-        pass
+    # ── Ollama local backend ──────────────────────────────────────────────────────────────
+    # Uses Ollama (https://ollama.com) which runs entirely on-device via Metal.
+    # Ollama is a single binary that installs into ~/bin — no admin rights needed.
+    # It exposes a plain HTTP API, so there are zero MLX threading issues.
+    import urllib.request as _urllib_req
 
     # ── Constants ─────────────────────────────────────────────────────────────────────────
-    # Swap this string to change the model. Must already be downloaded to
-    # ~/.cache/huggingface/hub/ or will auto-download on first run (~5 GB).
-    _FT_MODEL_ID = "FakeRockert543/gemma-4-e4b-it-MLX-4bit"
     _FT_COL = "Is there anything else we should know when considering your preferences?"
     _FT_TRIVIAL = {
         "no", "nah", "nar", "no thank you", "not really", "n/a", "none",
@@ -2748,25 +2740,82 @@ fishing", "I'm excited", "I like music"
 Return ONLY the JSON object. No explanation. No markdown. No other text."""
 
     # ── Dependency check ──────────────────────────────────────────────────────────────────
-    _ft_mlx_ok = False
+    _ft_mlx_ok = False   # reused as "AI backend ready" flag
     _ft_rf_ok  = False
-    try:
-        import mlx.core as _mx_core          # ensure stream exists before importing mlx_lm
-        _mx_core.eval(_mx_core.zeros([1]))
-        from mlx_lm import load as _mlx_load, generate as _mlx_generate
-        _ft_mlx_ok = True
-    except Exception as _mlx_import_err:
-        st.warning(
-            f"mlx-lm could not be loaded ({_mlx_import_err}).\n\n"
-            "Run: `pip install --upgrade mlx-lm`\n\n"
-            "This tool requires an Apple Silicon Mac. The model (~5 GB) will download "
-            "automatically to `~/.cache/huggingface/hub/` on first use."
-        )
     try:
         from rapidfuzz import process as _rf_process, fuzz as _rf_fuzz
         _ft_rf_ok = True
     except ImportError:
         st.warning("rapidfuzz is not installed. Run: `pip install rapidfuzz`")
+
+    # ── Ollama status check ───────────────────────────────────────────────────────────────
+    # Recommended model: gemma3:4b  (~3.3 GB, runs well on M4 MacBook Air 16 GB)
+    # Pull with:  ollama pull gemma3:4b
+    _FT_OLLAMA_URL   = "http://localhost:11434"
+    _FT_OLLAMA_MODEL = "gemma3:4b"
+
+    def _ft_ollama_running() -> bool:
+        """Return True if the Ollama server is reachable."""
+        try:
+            _urllib_req.urlopen(f"{_FT_OLLAMA_URL}/api/tags", timeout=2)
+            return True
+        except Exception:
+            return False
+
+    def _ft_ollama_model_available(model: str) -> bool:
+        """Return True if the given model has been pulled."""
+        try:
+            import json as _j
+            with _urllib_req.urlopen(f"{_FT_OLLAMA_URL}/api/tags", timeout=3) as _r:
+                _tags = _j.loads(_r.read())
+            return any(m.get("name", "").startswith(model.split(":")[0])
+                       for m in _tags.get("models", []))
+        except Exception:
+            return False
+
+    def _ft_call_ollama(prompt_text: str) -> str:
+        """Send one student response to Ollama and return the raw reply text."""
+        import json as _j
+        _body = _j.dumps({
+            "model":  _FT_OLLAMA_MODEL,
+            "prompt": f"{_FT_SYSTEM_PROMPT}\n\nStudent response:\n\n{prompt_text}",
+            "stream": False,
+            "options": {"temperature": 0, "num_predict": 1024},
+            "format": "json",          # tells Ollama to constrain output to valid JSON
+        }).encode("utf-8")
+        _req = _urllib_req.Request(
+            f"{_FT_OLLAMA_URL}/api/generate",
+            data=_body,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with _urllib_req.urlopen(_req, timeout=60) as _resp:
+            _data = _j.loads(_resp.read())
+        return _data["response"]
+
+    # ── Sidebar: Ollama status ────────────────────────────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.header("🤖 AI Settings")
+    _ollama_up    = _ft_ollama_running()
+    _model_ready  = _ollama_up and _ft_ollama_model_available(_FT_OLLAMA_MODEL)
+
+    if _ollama_up and _model_ready:
+        st.sidebar.success(f"✅ Ollama running — {_FT_OLLAMA_MODEL} ready")
+        _ft_mlx_ok = True
+    elif _ollama_up and not _model_ready:
+        st.sidebar.warning(
+            f"⚠️ Ollama is running but **{_FT_OLLAMA_MODEL}** hasn't been downloaded yet.\n\n"
+            f"Open Terminal and run:\n```\nollama pull {_FT_OLLAMA_MODEL}\n```"
+        )
+    else:
+        st.sidebar.error(
+            "❌ Ollama is not running.\n\n"
+            "**One-time setup (no admin needed):**\n"
+            "1. Download from [ollama.com](https://ollama.com) and open the `.dmg` — "
+            "it installs to your home folder.\n"
+            f"2. In Terminal: `ollama pull {_FT_OLLAMA_MODEL}`\n"
+            "3. Refresh this page."
+        )
 
     # ── Session state init ─────────────────────────────────────────────────────────────────
     for _ftk, _ftv in [
@@ -2777,8 +2826,6 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         ("y9_ft_noted_list",      []),   # list of (email, category) tuples
         ("y9_ft_friend_dec",      {}),   # (email, raw_nm) -> {action, resolved}
         ("y9_ft_perm_dec",        {}),   # (email, 'perm') -> {type, ...}
-        ("y9_ft_model",           None),
-        ("y9_ft_tokenizer",       None),
     ]:
         if _ftk not in st.session_state:
             st.session_state[_ftk] = _ftv
@@ -2926,7 +2973,8 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
             disabled=(not _ft_mlx_ok) or (not _ft_rf_ok) or st.session_state.y9_ft_analysed,
             use_container_width=True,
             type="primary",
-            key="y9_ft_analyse_btn"
+            key="y9_ft_analyse_btn",
+            help="Start Ollama and pull the model first — see the sidebar." if not _ft_mlx_ok else None
         )
     with _ft_rst_col:
         _ft_reset_clicked = st.button(
@@ -2946,23 +2994,6 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
     # ── Analysis execution ────────────────────────────────────────────────────────────────
     if _ft_analyse_clicked and _ft_mlx_ok and _ft_rf_ok:
 
-        # Re-initialise the Metal stream for this thread before any MLX work.
-        # Streamlit may have re-used a different thread between reruns.
-        try:
-            import mlx.core as _mx_core
-            _mx_core.eval(_mx_core.zeros([1]))
-        except Exception:
-            pass
-
-        # Load model once into session state
-        if st.session_state.y9_ft_model is None:
-            with st.spinner(f"⏳ Loading AI model — {_FT_MODEL_ID} (first load may take ~30 s)…"):
-                _m, _t = _mlx_load(_FT_MODEL_ID)
-                st.session_state.y9_ft_model = _m
-                st.session_state.y9_ft_tokenizer = _t
-
-        _ft_model     = st.session_state.y9_ft_model
-        _ft_tokenizer = st.session_state.y9_ft_tokenizer
         _ft_results   = []
         _ft_n         = len(_ft_rows_to_analyse)
         _ft_prog      = st.progress(0, text="Starting analysis…")
@@ -2973,23 +3004,8 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                 text=f"Analysing response {_fi + 1} of {_ft_n} — {_frow['name']}…"
             )
 
-            _messages = [
-                {"role": "system", "content": _FT_SYSTEM_PROMPT},
-                {"role": "user",   "content": f"Student response:\n\n{_frow['text']}"}
-            ]
-
             try:
-                if hasattr(_ft_tokenizer, "apply_chat_template"):
-                    _prompt_str = _ft_tokenizer.apply_chat_template(
-                        _messages, tokenize=False, add_generation_prompt=True
-                    )
-                else:
-                    _prompt_str = f"{_FT_SYSTEM_PROMPT}\n\nStudent response:\n\n{_frow['text']}"
-
-                _raw = _mlx_generate(
-                    _ft_model, _ft_tokenizer,
-                    prompt=_prompt_str, max_tokens=800, verbose=False
-                )
+                _raw = _ft_call_ollama(_frow["text"])
 
                 # Strip accidental markdown fences
                 _clean = _raw.strip()
@@ -3416,5 +3432,5 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
     elif not st.session_state.y9_ft_analysed:
         st.info(
             "Click **🔬 Analyse Free-Text Responses** above to run the AI over the survey. "
-            "The model will be loaded from your local cache — no data leaves your Mac."
+            "All processing happens on-device via Ollama — no data leaves your Mac."
         )
