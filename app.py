@@ -3172,12 +3172,16 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                                 st.rerun()
 
                 # ── Tent notes ────────────────────────────────────────────────────────────
-                if _tent := (_ll.get("tent_notes") or "").strip():
+                _tent_raw = _ll.get("tent_notes")
+                if isinstance(_tent_raw, list): _tent_raw = " ".join(str(x) for x in _tent_raw if x)
+                if _tent := (str(_tent_raw) if _tent_raw else "").strip():
                     st.markdown("**🔵 Tent note:**")
                     st.write(_tent)
 
                 # ── Medical notes ─────────────────────────────────────────────────────────
-                if _med := (_ll.get("medical_notes") or "").strip():
+                _med_raw = _ll.get("medical_notes")
+                if isinstance(_med_raw, list): _med_raw = " ".join(str(x) for x in _med_raw if x)
+                if _med := (str(_med_raw) if _med_raw else "").strip():
                     st.markdown("**🔴 Medical:**")
                     st.write(_med)
                     _mnote_key = (_fres["email"], "Medical")
@@ -3189,7 +3193,9 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                             st.rerun()
 
                 # ── Permission notes ──────────────────────────────────────────────────────
-                if _perm := (_ll.get("permission_notes") or "").strip():
+                _perm_raw = _ll.get("permission_notes")
+                if isinstance(_perm_raw, list): _perm_raw = " ".join(str(x) for x in _perm_raw if x)
+                if _perm := (str(_perm_raw) if _perm_raw else "").strip():
                     st.markdown("**🟡 Permission:**")
                     st.write(_perm)
                     _perm_key = (_fres["email"], "perm")
@@ -3238,7 +3244,9 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                                 st.rerun()
 
                 # ── Concern notes ─────────────────────────────────────────────────────────
-                if _concern := (_ll.get("concern_notes") or "").strip():
+                _concern_raw = _ll.get("concern_notes")
+                if isinstance(_concern_raw, list): _concern_raw = " ".join(str(x) for x in _concern_raw if x)
+                if _concern := (str(_concern_raw) if _concern_raw else "").strip():
                     st.markdown("**🟣 Concern:**")
                     st.write(_concern)
                     _cnote_key = (_fres["email"], "Concern")
@@ -3256,7 +3264,9 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                     ("logistics_notes",  "⚪ Logistics"),
                     ("other_notes",      "📝 Other"),
                 ]:
-                    if _note_val := (_ll.get(_note_field) or "").strip():
+                    _raw_val = _ll.get(_note_field)
+                    if isinstance(_raw_val, list): _raw_val = " ".join(str(x) for x in _raw_val if x)
+                    if _note_val := (str(_raw_val) if _raw_val else "").strip():
                         st.markdown(f"**{_note_label}:**")
                         st.write(_note_val)
 
@@ -3368,7 +3378,9 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                 _wk_str = f"Week {int(_wk)}" if (_wk and not pd.isna(_wk)) else "Unknown"
 
                 for _fld, _cat in _FT_NOTE_FIELDS:
-                    _val = (_fres["llm"].get(_fld) or "").strip()
+                    _raw_val = _fres["llm"].get(_fld)
+                    if isinstance(_raw_val, list): _raw_val = " ".join(str(x) for x in _raw_val if x)
+                    _val = (str(_raw_val) if _raw_val else "").strip()
                     if _val:
                         _ft_note_rows.append({
                             "Student":           _nm,
