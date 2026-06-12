@@ -1428,7 +1428,17 @@ elif page == "🏔️ Y9 Journey Groups":
                 if ch in _letter_map: return _letter_map[ch]
             return ''
         if _house_col_stud:
-            df_s['House_stud'] = df_s[_house_col_stud].astype(str).str.strip().str.lower()
+            # Student list uses two-letter abbreviations (Un, Ho, Ra, Ma) — expand to full names
+            _two_letter_map = {'un': 'unwin', 'ho': 'hodgkin', 'ra': 'ransome', 'ma': 'mather'}
+            def _expand_house_abbrev(val):
+                v = str(val).strip().lower()
+                if v in _full_house_names: return v                   # already full name
+                if v in _two_letter_map:   return _two_letter_map[v]  # "un" -> "unwin" etc.
+                if v in _letter_map:       return _letter_map[v]      # "u"  -> "unwin" etc.
+                for h in _full_house_names:                           # partial match fallback
+                    if h.startswith(v) and len(v) >= 2: return h
+                return v
+            df_s['House_stud'] = df_s[_house_col_stud].apply(_expand_house_abbrev)
         elif _rg_col:
             df_s['House_stud'] = df_s[_rg_col].apply(_house_from_rg)
         else:
@@ -2887,7 +2897,17 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         return ""
 
     if _ft_house_col_s:
-        _ft_df_s["House"] = _ft_df_s[_ft_house_col_s].astype(str).str.strip().str.lower()
+        # Student list uses two-letter abbreviations (Un, Ho, Ra, Ma) — expand to full names
+        _ft_two_letter_map = {'un': 'unwin', 'ho': 'hodgkin', 'ra': 'ransome', 'ma': 'mather'}
+        def _ft_expand_house_abbrev(val):
+            v = str(val).strip().lower()
+            if v in _ft_full_houses:     return v                       # already full name
+            if v in _ft_two_letter_map:  return _ft_two_letter_map[v]  # "un" -> "unwin" etc.
+            if v in _ft_letter_map:      return _ft_letter_map[v]      # "u"  -> "unwin" etc.
+            for h in _ft_full_houses:                                   # partial match fallback
+                if h.startswith(v) and len(v) >= 2: return h
+            return v
+        _ft_df_s["House"] = _ft_df_s[_ft_house_col_s].apply(_ft_expand_house_abbrev)
     elif _ft_rg_col:
         _ft_df_s["House"] = _ft_df_s[_ft_rg_col].apply(_ft_house_from_rg)
     else:
