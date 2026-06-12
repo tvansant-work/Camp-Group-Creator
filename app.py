@@ -2749,12 +2749,12 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         st.warning("rapidfuzz is not installed. Run: `pip install rapidfuzz`")
 
     # ── Ollama status check ───────────────────────────────────────────────────────────────
-    # Model: gemma3:4b  (~3.3 GB 4-bit, Google Gemma 3 4B — runs well on M4 MacBook Air 16 GB)
-    # Pull with:  ollama pull gemma3:4b
+    # Model: gemma4:e4b  (~5.0 GB 4-bit, Google Gemma 4 E4B — 4.5B effective / 8B total params, edge-optimised)
+    # Pull with:  ollama pull gemma4:e4b
     _FT_OLLAMA_URL        = "http://localhost:11434"
-    _FT_OLLAMA_MODEL      = "gemma3:4b"
-    _FT_OLLAMA_MODEL_SIZE = "~3.3 GB"
-    _FT_OLLAMA_MODEL_DESC = "Google Gemma 3 (4B, 4-bit)"
+    _FT_OLLAMA_MODEL      = "gemma4:e4b"
+    _FT_OLLAMA_MODEL_SIZE = "~5.0 GB"
+    _FT_OLLAMA_MODEL_DESC = "Google Gemma 4 E4B (4.5B effective, 4-bit)"
 
     def _ft_ollama_running() -> bool:
         """Return True if the Ollama server is reachable."""
