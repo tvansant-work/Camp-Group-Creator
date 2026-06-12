@@ -2749,12 +2749,12 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         st.warning("rapidfuzz is not installed. Run: `pip install rapidfuzz`")
 
     # ── Ollama status check ───────────────────────────────────────────────────────────────
-    # Model: gemma4  (~3.3 GB 4-bit, Google Gemma 4 — optimised for M4 via Metal)
-    # Pull with:  ollama pull gemma4
+    # Model: gemma3:4b  (~3.3 GB 4-bit, Google Gemma 3 4B — runs well on M4 MacBook Air 16 GB)
+    # Pull with:  ollama pull gemma3:4b
     _FT_OLLAMA_URL        = "http://localhost:11434"
-    _FT_OLLAMA_MODEL      = "gemma4"
+    _FT_OLLAMA_MODEL      = "gemma3:4b"
     _FT_OLLAMA_MODEL_SIZE = "~3.3 GB"
-    _FT_OLLAMA_MODEL_DESC = "Google Gemma 4 (4-bit)"
+    _FT_OLLAMA_MODEL_DESC = "Google Gemma 3 (4B, 4-bit)"
 
     def _ft_ollama_running() -> bool:
         """Return True if the Ollama server is reachable."""
@@ -2827,15 +2827,15 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
 
     # ── Session state init ─────────────────────────────────────────────────────────────────
     for _ftk, _ftv in [
-        ("y9_ft_results",          []),
-        ("y9_ft_analysed",         False),
-        ("y9_ft_new_must",         []),
-        ("y9_ft_new_force_week",   {}),
-        ("y9_ft_noted_list",       []),   # list of (email, category) tuples — kept for compat
-        ("y9_ft_friend_dec",       {}),   # (email, raw_nm) -> {action, resolved}
-        ("y9_ft_perm_dec",         {}),   # (email, 'perm') -> {type, ...}
-        ("y9_ft_staff_ticks",      {}),   # (email, field_key) -> bool  — which notes to export
-        ("y9_ft_manual_add",       {}),   # email -> list of {type, detail} manual additions
+        ("y9_ft_results",         []),
+        ("y9_ft_analysed",        False),
+        ("y9_ft_new_must",        []),
+        ("y9_ft_new_force_week",  {}),
+        ("y9_ft_noted_list",      []),   # list of (email, category) tuples — kept for compat
+        ("y9_ft_friend_dec",      {}),   # (email, raw_nm) -> {action, resolved}
+        ("y9_ft_perm_dec",        {}),   # (email, 'perm') -> {type, ...}
+        ("y9_ft_staff_ticks",     {}),   # (email, field_key) -> bool — which notes to export
+        ("y9_ft_manual_add",      {}),   # email -> list of {type, detail} manual additions
     ]:
         if _ftk not in st.session_state:
             st.session_state[_ftk] = _ftv
@@ -3183,6 +3183,22 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                                 }
                                 st.rerun()
 
+                # ── Tent notes ────────────────────────────────────────────────────────────
+                _tent_raw = _ll.get("tent_notes")
+                if isinstance(_tent_raw, list): _tent_raw = " ".join(str(x) for x in _tent_raw if x)
+                if _tent := (str(_tent_raw) if _tent_raw else "").strip():
+                    _tent_tick_key = (_fres["email"], "tent_notes")
+                    _tent_ticked   = st.session_state.y9_ft_staff_ticks.get(_tent_tick_key, False)
+                    _new_tent_tick = st.checkbox(
+                        f"🔵 **Tent:** {_tent}",
+                        value=_tent_ticked,
+                        key=f"y9_ft_tick_tent_{_fi}",
+                        help="Tick to include in Staff Notes export"
+                    )
+                    if _new_tent_tick != _tent_ticked:
+                        st.session_state.y9_ft_staff_ticks[_tent_tick_key] = _new_tent_tick
+                        st.rerun()
+
                 # ── Medical notes ─────────────────────────────────────────────────────────
                 _med_raw = _ll.get("medical_notes")
                 if isinstance(_med_raw, list): _med_raw = " ".join(str(x) for x in _med_raw if x)
@@ -3268,7 +3284,6 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
 
                 # ── Read-only notes with tick-to-export checkboxes ────────────────────────
                 for _note_field, _note_label, _note_emoji in [
-                    ("tent_notes",       "Tent",       "🔵"),
                     ("preference_notes", "Preference", "🟢"),
                     ("equipment_notes",  "Equipment",  "⚪"),
                     ("logistics_notes",  "Logistics",  "⚪"),
@@ -3312,12 +3327,11 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                         st.rerun()
 
                 # Add-new form
-                _man_type_key   = f"y9_ft_man_type_{_fi}"
-                _man_detail_key = f"y9_ft_man_det_{_fi}"
+                _man_type_key    = f"y9_ft_man_type_{_fi}"
                 _man_partner_key = f"y9_ft_man_partner_{_fi}"
-                _man_camp_key   = f"y9_ft_man_camp_{_fi}"
-                _man_week_key   = f"y9_ft_man_week_{_fi}"
-                _man_note_key   = f"y9_ft_man_note_{_fi}"
+                _man_camp_key    = f"y9_ft_man_camp_{_fi}"
+                _man_week_key    = f"y9_ft_man_week_{_fi}"
+                _man_note_key    = f"y9_ft_man_note_{_fi}"
 
                 _man_type = st.selectbox(
                     "Add type:",
@@ -3384,8 +3398,7 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                     if st.button("➕ Add Staff Note", key=f"y9_ft_man_add_{_fi}_note", use_container_width=True):
                         if _man_note and _man_note.strip():
                             _detail = _man_note.strip()
-                            _man_entries.append({"type": "staff_note", "detail": _detail,
-                                                 "ticked": True})
+                            _man_entries.append({"type": "staff_note", "detail": _detail})
                             st.session_state.y9_ft_manual_add[_man_email] = _man_entries
                             st.rerun()
 
@@ -3514,8 +3527,7 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                             })
 
                 # Manual additions for this student
-                # staff_note → Other category; force_camp → Preference category (staff reference)
-                # pairing and force_week are already captured in the Rules JSON export
+                # staff_note → Other; force_camp → Preference; pairing/force_week → Other/Logistics
                 for _me in st.session_state.y9_ft_manual_add.get(_fres["email"], []):
                     if _me["type"] == "staff_note":
                         _ft_note_rows.append({
