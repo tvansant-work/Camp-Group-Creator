@@ -513,9 +513,25 @@ if page == "🏕️ Y8 Group Creator":
                     
                     friends_in_camp = sum(1 for f in reqs if f in camp_group)
                     if reqs and friends_in_camp == 0:
-                        isolated_students.append({'Class': cls, 'Camp': camp_name, 'Student': student, 'Reason': 'Got 0 requested friends'})
+                        _why_parts = []
+                        for _rf in reqs:
+                            _other_grp = bof_group if camp_name == 'Freycinet' else freycinet_group
+                            _is_sep = any(({student, _rf} == {a, b}) for a, b in st.session_state.separation_pairs)
+                            if _is_sep:
+                                _why_parts.append(f"{_rf}: separation rule applied")
+                            elif _rf in st.session_state.forced_locations and st.session_state.forced_locations[_rf] != camp_name:
+                                _why_parts.append(f"{_rf}: staff forced to {st.session_state.forced_locations[_rf]}")
+                            elif camp_name == 'Freycinet' and G.nodes.get(_rf, {}).get('f_veto', False):
+                                _why_parts.append(f"{_rf}: vetoed Freycinet activities")
+                            elif camp_name == 'Bay of Fires' and G.nodes.get(_rf, {}).get('b_veto', False):
+                                _why_parts.append(f"{_rf}: vetoed Bay of Fires activities")
+                            elif _rf in _other_grp:
+                                _why_parts.append(f"{_rf}: AI balanced group size / gender / competing requests")
+                            else:
+                                _why_parts.append(f"{_rf}: not placed in either group")
+                        isolated_students.append({'Class': cls, 'Camp': camp_name, 'Student': student, 'Reason': 'Got 0 requested friends', 'Why': ' | '.join(_why_parts)})
                     elif not reqs:
-                        isolated_students.append({'Class': cls, 'Camp': camp_name, 'Student': student, 'Reason': 'Made no friend requests'})
+                        isolated_students.append({'Class': cls, 'Camp': camp_name, 'Student': student, 'Reason': 'Made no friend requests', 'Why': 'No friend preferences submitted'})
 
                     sk = student_row.get('How excited would you be to go sea kayaking?', 'N/A') if student_row['Responded'] else 'N/A'
                     coast = student_row.get('How excited would you be to go coasteering?', 'N/A') if student_row['Responded'] else 'N/A'
@@ -1428,17 +1444,7 @@ elif page == "🏔️ Y9 Journey Groups":
                 if ch in _letter_map: return _letter_map[ch]
             return ''
         if _house_col_stud:
-            # Student list uses two-letter abbreviations (Un, Ho, Ra, Ma) — expand to full names
-            _two_letter_map = {'un': 'unwin', 'ho': 'hodgkin', 'ra': 'ransome', 'ma': 'mather'}
-            def _expand_house_abbrev(val):
-                v = str(val).strip().lower()
-                if v in _full_house_names: return v                   # already full name
-                if v in _two_letter_map:   return _two_letter_map[v]  # "un" -> "unwin" etc.
-                if v in _letter_map:       return _letter_map[v]      # "u"  -> "unwin" etc.
-                for h in _full_house_names:                           # partial match fallback
-                    if h.startswith(v) and len(v) >= 2: return h
-                return v
-            df_s['House_stud'] = df_s[_house_col_stud].apply(_expand_house_abbrev)
+            df_s['House_stud'] = df_s[_house_col_stud].astype(str).str.strip().str.lower()
         elif _rg_col:
             df_s['House_stud'] = df_s[_rg_col].apply(_house_from_rg)
         else:
@@ -2282,6 +2288,11 @@ elif page == "🏔️ Y9 Journey Groups":
         # ── COMPUTE ISOLATED STUDENTS ─────────────────────────────────────────────────────
         isolated_y9 = []
         _seen_iso = set()
+        # Build a camp-preference lookup so we can explain why friends weren't placed together
+        _y9_pref_lk = {
+            row['Official Name']: (row['Camp Prefs'] if isinstance(row['Camp Prefs'], dict) else {})
+            for _, row in df_y9.iterrows()
+        }
         for _nm, (_fw, _fc, _fsg) in full_lookup.items():
             _friends = all_friend_reqs.get(_nm, [])
             if not _friends: continue
@@ -2290,12 +2301,33 @@ elif page == "🏔️ Y9 Journey Groups":
                     if _nm not in _seen_iso:
                         _seen_iso.add(_nm)
                         _f_dest = full_lookup.get(_f)
+                        # Determine the most likely reason they weren't placed together
+                        if not _f_dest:
+                            _iso_why = "Friend not placed — check their house/week data"
+                        elif _f_dest[0] != _fw:
+                            _f_wk_lbl = "Week 1 (Unwin & Hodgkin)" if _f_dest[0] == 1 else "Week 2 (Mather & Ransome)"
+                            _iso_why = f"Friend is in a different week ({_f_wk_lbl}) — different house group"
+                        elif any(({_nm, _f} == {a, b}) for a, b in st.session_state.y9_sep):
+                            _iso_why = "Separation rule applied by staff"
+                        elif _f in st.session_state.y9_force and st.session_state.y9_force[_f] != _fc:
+                            _forced_lbl = Y9_CAMP_DEFS.get(st.session_state.y9_force[_f], {}).get('label', st.session_state.y9_force[_f])
+                            _iso_why = f"Friend staff-forced to {_forced_lbl}"
+                        elif _nm in st.session_state.y9_force and st.session_state.y9_force[_nm] != _fc:
+                            _iso_why = f"Student staff-forced to {Y9_CAMP_DEFS.get(_fc, {}).get('label', _fc)}"
+                        else:
+                            _f_prefs = _y9_pref_lk.get(_f, {})
+                            _f_top_camp = min(_f_prefs, key=_f_prefs.get) if _f_prefs else None
+                            if _f_top_camp and _f_top_camp != _fc:
+                                _iso_why = f"Friend's top preference was {Y9_CAMP_DEFS.get(_f_top_camp, {}).get('label', _f_top_camp)}"
+                            else:
+                                _iso_why = "Group capacity / competing requests — AI couldn't satisfy all preferences"
                         isolated_y9.append({
                             'Week': _fw,
                             'Student': _nm,
                             'Assigned Camp': Y9_CAMP_DEFS[_fc]['label'],
                             'Friend Requested': _f,
                             'Friend\'s Camp': Y9_CAMP_DEFS[_f_dest[1]]['label'] if _f_dest else 'Not placed',
+                            'Why': _iso_why,
                         })
                     break
 
@@ -2897,17 +2929,7 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         return ""
 
     if _ft_house_col_s:
-        # Student list uses two-letter abbreviations (Un, Ho, Ra, Ma) — expand to full names
-        _ft_two_letter_map = {'un': 'unwin', 'ho': 'hodgkin', 'ra': 'ransome', 'ma': 'mather'}
-        def _ft_expand_house_abbrev(val):
-            v = str(val).strip().lower()
-            if v in _ft_full_houses:     return v                       # already full name
-            if v in _ft_two_letter_map:  return _ft_two_letter_map[v]  # "un" -> "unwin" etc.
-            if v in _ft_letter_map:      return _ft_letter_map[v]      # "u"  -> "unwin" etc.
-            for h in _ft_full_houses:                                   # partial match fallback
-                if h.startswith(v) and len(v) >= 2: return h
-            return v
-        _ft_df_s["House"] = _ft_df_s[_ft_house_col_s].apply(_ft_expand_house_abbrev)
+        _ft_df_s["House"] = _ft_df_s[_ft_house_col_s].astype(str).str.strip().str.lower()
     elif _ft_rg_col:
         _ft_df_s["House"] = _ft_df_s[_ft_rg_col].apply(_ft_house_from_rg)
     else:
