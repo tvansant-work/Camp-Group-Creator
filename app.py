@@ -2749,10 +2749,12 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         st.warning("rapidfuzz is not installed. Run: `pip install rapidfuzz`")
 
     # ── Ollama status check ───────────────────────────────────────────────────────────────
-    # Recommended model: gemma3:4b  (~3.3 GB, runs well on M4 MacBook Air 16 GB)
-    # Pull with:  ollama pull gemma3:4b
-    _FT_OLLAMA_URL   = "http://localhost:11434"
-    _FT_OLLAMA_MODEL = "gemma3:4b"
+    # Model: gemma4  (~3.3 GB 4-bit, Google Gemma 4 — optimised for M4 via Metal)
+    # Pull with:  ollama pull gemma4
+    _FT_OLLAMA_URL        = "http://localhost:11434"
+    _FT_OLLAMA_MODEL      = "gemma4"
+    _FT_OLLAMA_MODEL_SIZE = "~3.3 GB"
+    _FT_OLLAMA_MODEL_DESC = "Google Gemma 4 (4-bit)"
 
     def _ft_ollama_running() -> bool:
         """Return True if the Ollama server is reachable."""
@@ -2796,11 +2798,17 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
     # ── Sidebar: Ollama status ────────────────────────────────────────────────────────────
     st.sidebar.markdown("---")
     st.sidebar.header("🤖 AI Settings")
+    st.sidebar.markdown(
+        f"**Model:** `{_FT_OLLAMA_MODEL}`  \n"
+        f"**Engine:** {_FT_OLLAMA_MODEL_DESC}  \n"
+        f"**Size:** {_FT_OLLAMA_MODEL_SIZE}  \n"
+        f"**Backend:** Ollama (on-device, Metal)"
+    )
     _ollama_up    = _ft_ollama_running()
     _model_ready  = _ollama_up and _ft_ollama_model_available(_FT_OLLAMA_MODEL)
 
     if _ollama_up and _model_ready:
-        st.sidebar.success(f"✅ Ollama running — {_FT_OLLAMA_MODEL} ready")
+        st.sidebar.success(f"✅ Ollama running — `{_FT_OLLAMA_MODEL}` ready")
         _ft_mlx_ok = True
     elif _ollama_up and not _model_ready:
         st.sidebar.warning(
@@ -2819,13 +2827,15 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
 
     # ── Session state init ─────────────────────────────────────────────────────────────────
     for _ftk, _ftv in [
-        ("y9_ft_results",         []),
-        ("y9_ft_analysed",        False),
-        ("y9_ft_new_must",        []),
-        ("y9_ft_new_force_week",  {}),
-        ("y9_ft_noted_list",      []),   # list of (email, category) tuples
-        ("y9_ft_friend_dec",      {}),   # (email, raw_nm) -> {action, resolved}
-        ("y9_ft_perm_dec",        {}),   # (email, 'perm') -> {type, ...}
+        ("y9_ft_results",          []),
+        ("y9_ft_analysed",         False),
+        ("y9_ft_new_must",         []),
+        ("y9_ft_new_force_week",   {}),
+        ("y9_ft_noted_list",       []),   # list of (email, category) tuples — kept for compat
+        ("y9_ft_friend_dec",       {}),   # (email, raw_nm) -> {action, resolved}
+        ("y9_ft_perm_dec",         {}),   # (email, 'perm') -> {type, ...}
+        ("y9_ft_staff_ticks",      {}),   # (email, field_key) -> bool  — which notes to export
+        ("y9_ft_manual_add",       {}),   # email -> list of {type, detail} manual additions
     ]:
         if _ftk not in st.session_state:
             st.session_state[_ftk] = _ftv
@@ -2985,9 +2995,11 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         )
 
     if _ft_reset_clicked:
-        for _rk in ["y9_ft_results", "y9_ft_new_must", "y9_ft_new_force_week",
-                    "y9_ft_noted_list", "y9_ft_friend_dec", "y9_ft_perm_dec"]:
-            st.session_state[_rk] = [] if _rk in ("y9_ft_results", "y9_ft_new_must", "y9_ft_noted_list") else {}
+        for _rk in ["y9_ft_results", "y9_ft_new_must", "y9_ft_noted_list"]:
+            st.session_state[_rk] = []
+        for _rk in ["y9_ft_new_force_week", "y9_ft_friend_dec", "y9_ft_perm_dec",
+                    "y9_ft_staff_ticks", "y9_ft_manual_add"]:
+            st.session_state[_rk] = {}
         st.session_state.y9_ft_analysed = False
         st.rerun()
 
@@ -3171,26 +3183,21 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                                 }
                                 st.rerun()
 
-                # ── Tent notes ────────────────────────────────────────────────────────────
-                _tent_raw = _ll.get("tent_notes")
-                if isinstance(_tent_raw, list): _tent_raw = " ".join(str(x) for x in _tent_raw if x)
-                if _tent := (str(_tent_raw) if _tent_raw else "").strip():
-                    st.markdown("**🔵 Tent note:**")
-                    st.write(_tent)
-
                 # ── Medical notes ─────────────────────────────────────────────────────────
                 _med_raw = _ll.get("medical_notes")
                 if isinstance(_med_raw, list): _med_raw = " ".join(str(x) for x in _med_raw if x)
                 if _med := (str(_med_raw) if _med_raw else "").strip():
-                    st.markdown("**🔴 Medical:**")
-                    st.write(_med)
-                    _mnote_key = (_fres["email"], "Medical")
-                    if _mnote_key in _ft_noted_set:
-                        st.success("✅ Noted")
-                    else:
-                        if st.button("✅ Noted", key=f"y9_ft_med_{_fi}"):
-                            st.session_state.y9_ft_noted_list.append(list(_mnote_key))
-                            st.rerun()
+                    _med_tick_key = (_fres["email"], "medical_notes")
+                    _med_ticked   = st.session_state.y9_ft_staff_ticks.get(_med_tick_key, False)
+                    _new_med_tick = st.checkbox(
+                        f"🔴 **Medical:** {_med}",
+                        value=_med_ticked,
+                        key=f"y9_ft_tick_med_{_fi}",
+                        help="Tick to include in Staff Notes export"
+                    )
+                    if _new_med_tick != _med_ticked:
+                        st.session_state.y9_ft_staff_ticks[_med_tick_key] = _new_med_tick
+                        st.rerun()
 
                 # ── Permission notes ──────────────────────────────────────────────────────
                 _perm_raw = _ll.get("permission_notes")
@@ -3247,28 +3254,140 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                 _concern_raw = _ll.get("concern_notes")
                 if isinstance(_concern_raw, list): _concern_raw = " ".join(str(x) for x in _concern_raw if x)
                 if _concern := (str(_concern_raw) if _concern_raw else "").strip():
-                    st.markdown("**🟣 Concern:**")
-                    st.write(_concern)
-                    _cnote_key = (_fres["email"], "Concern")
-                    if _cnote_key in _ft_noted_set:
-                        st.success("✅ Noted")
-                    else:
-                        if st.button("✅ Noted", key=f"y9_ft_concern_{_fi}"):
-                            st.session_state.y9_ft_noted_list.append(list(_cnote_key))
-                            st.rerun()
+                    _con_tick_key = (_fres["email"], "concern_notes")
+                    _con_ticked   = st.session_state.y9_ft_staff_ticks.get(_con_tick_key, False)
+                    _new_con_tick = st.checkbox(
+                        f"🟣 **Concern:** {_concern}",
+                        value=_con_ticked,
+                        key=f"y9_ft_tick_concern_{_fi}",
+                        help="Tick to include in Staff Notes export"
+                    )
+                    if _new_con_tick != _con_ticked:
+                        st.session_state.y9_ft_staff_ticks[_con_tick_key] = _new_con_tick
+                        st.rerun()
 
-                # ── Read-only notes (flow to Staff Notes only) ────────────────────────────
-                for _note_field, _note_label in [
-                    ("preference_notes", "🟢 Preference"),
-                    ("equipment_notes",  "⚪ Equipment"),
-                    ("logistics_notes",  "⚪ Logistics"),
-                    ("other_notes",      "📝 Other"),
+                # ── Read-only notes with tick-to-export checkboxes ────────────────────────
+                for _note_field, _note_label, _note_emoji in [
+                    ("tent_notes",       "Tent",       "🔵"),
+                    ("preference_notes", "Preference", "🟢"),
+                    ("equipment_notes",  "Equipment",  "⚪"),
+                    ("logistics_notes",  "Logistics",  "⚪"),
+                    ("other_notes",      "Other",      "📝"),
                 ]:
                     _raw_val = _ll.get(_note_field)
                     if isinstance(_raw_val, list): _raw_val = " ".join(str(x) for x in _raw_val if x)
                     if _note_val := (str(_raw_val) if _raw_val else "").strip():
-                        st.markdown(f"**{_note_label}:**")
-                        st.write(_note_val)
+                        _n_tick_key = (_fres["email"], _note_field)
+                        _n_ticked   = st.session_state.y9_ft_staff_ticks.get(_n_tick_key, False)
+                        _new_n_tick = st.checkbox(
+                            f"{_note_emoji} **{_note_label}:** {_note_val}",
+                            value=_n_ticked,
+                            key=f"y9_ft_tick_{_note_field}_{_fi}",
+                            help="Tick to include in Staff Notes export"
+                        )
+                        if _new_n_tick != _n_ticked:
+                            st.session_state.y9_ft_staff_ticks[_n_tick_key] = _new_n_tick
+                            st.rerun()
+
+                # ── Manual additions ──────────────────────────────────────────────────────
+                st.markdown("---")
+                st.markdown("**➕ Manual additions** — add anything the AI missed:")
+
+                _man_email   = _fres["email"]
+                _man_entries = st.session_state.y9_ft_manual_add.get(_man_email, [])
+
+                # Show already-added manual entries
+                for _mi, _me in enumerate(_man_entries):
+                    _mc_label = {
+                        "pairing":    "🟠 Pairing",
+                        "force_camp": "🏕️ Forced camp",
+                        "force_week": "📅 Forced week",
+                        "staff_note": "📝 Staff note",
+                    }.get(_me["type"], _me["type"])
+                    _mcol1, _mcol2 = st.columns([5, 1])
+                    _mcol1.success(f"{_mc_label}: **{_me['detail']}**")
+                    if _mcol2.button("✕", key=f"y9_ft_man_del_{_man_email}_{_mi}", help="Remove"):
+                        _man_entries.pop(_mi)
+                        st.session_state.y9_ft_manual_add[_man_email] = _man_entries
+                        st.rerun()
+
+                # Add-new form
+                _man_type_key   = f"y9_ft_man_type_{_fi}"
+                _man_detail_key = f"y9_ft_man_det_{_fi}"
+                _man_partner_key = f"y9_ft_man_partner_{_fi}"
+                _man_camp_key   = f"y9_ft_man_camp_{_fi}"
+                _man_week_key   = f"y9_ft_man_week_{_fi}"
+                _man_note_key   = f"y9_ft_man_note_{_fi}"
+
+                _man_type = st.selectbox(
+                    "Add type:",
+                    ["— select —", "pairing", "force_camp", "force_week", "staff_note"],
+                    format_func=lambda x: {
+                        "— select —":  "— choose type —",
+                        "pairing":     "🟠 Student pairing (Must-Go)",
+                        "force_camp":  "🏕️ Forced camp assignment",
+                        "force_week":  "📅 Forced week override",
+                        "staff_note":  "📝 Custom staff note",
+                    }.get(x, x),
+                    key=_man_type_key,
+                    label_visibility="collapsed"
+                )
+
+                if _man_type == "pairing":
+                    _man_partner = st.selectbox(
+                        "Must go with:", ["— select —"] + _ft_official_names,
+                        key=_man_partner_key, label_visibility="collapsed"
+                    )
+                    if st.button("➕ Add Pairing", key=f"y9_ft_man_add_{_fi}_pair", use_container_width=True):
+                        if _man_partner and _man_partner != "— select —":
+                            _pair     = (_fres["name"], _man_partner)
+                            _rev_pair = (_man_partner, _fres["name"])
+                            _existing_m = list(st.session_state.y9_ft_new_must)
+                            if _pair not in _existing_m and _rev_pair not in _existing_m:
+                                st.session_state.y9_ft_new_must.append(_pair)
+                            _detail = f"{_fres['name']} + {_man_partner}"
+                            _man_entries.append({"type": "pairing", "detail": _detail})
+                            st.session_state.y9_ft_manual_add[_man_email] = _man_entries
+                            st.rerun()
+
+                elif _man_type == "force_camp":
+                    _man_camp = st.text_input(
+                        "Camp name / identifier:", placeholder="e.g. Dougie's camp",
+                        key=_man_camp_key, label_visibility="collapsed"
+                    )
+                    if st.button("➕ Add Forced Camp", key=f"y9_ft_man_add_{_fi}_camp", use_container_width=True):
+                        if _man_camp and _man_camp.strip():
+                            _detail = f"{_fres['name']} → {_man_camp.strip()}"
+                            _man_entries.append({"type": "force_camp", "detail": _detail})
+                            st.session_state.y9_ft_manual_add[_man_email] = _man_entries
+                            st.rerun()
+
+                elif _man_type == "force_week":
+                    _man_week = st.selectbox(
+                        "Force to week:", [1, 2],
+                        format_func=lambda w: f"Week {w}",
+                        key=_man_week_key, label_visibility="collapsed"
+                    )
+                    if st.button("➕ Add Forced Week", key=f"y9_ft_man_add_{_fi}_week", use_container_width=True):
+                        _wk = int(st.session_state.get(_man_week_key, 1))
+                        st.session_state.y9_ft_new_force_week[_fres["name"]] = _wk
+                        _detail = f"{_fres['name']} → Week {_wk}"
+                        _man_entries.append({"type": "force_week", "detail": _detail})
+                        st.session_state.y9_ft_manual_add[_man_email] = _man_entries
+                        st.rerun()
+
+                elif _man_type == "staff_note":
+                    _man_note = st.text_area(
+                        "Note text:", placeholder="Type the note to add to the staff export…",
+                        key=_man_note_key, label_visibility="collapsed", height=80
+                    )
+                    if st.button("➕ Add Staff Note", key=f"y9_ft_man_add_{_fi}_note", use_container_width=True):
+                        if _man_note and _man_note.strip():
+                            _detail = _man_note.strip()
+                            _man_entries.append({"type": "staff_note", "detail": _detail,
+                                                 "ticked": True})
+                            st.session_state.y9_ft_manual_add[_man_email] = _man_entries
+                            st.rerun()
 
         # Error expander
         if _ft_errors:
@@ -3382,12 +3501,56 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                     if isinstance(_raw_val, list): _raw_val = " ".join(str(x) for x in _raw_val if x)
                     _val = (str(_raw_val) if _raw_val else "").strip()
                     if _val:
+                        # Only include if the reviewer ticked it
+                        _tick_key = (_fres["email"], _fld)
+                        if st.session_state.y9_ft_staff_ticks.get(_tick_key, False):
+                            _ft_note_rows.append({
+                                "Student":           _nm,
+                                "House":             _hse.title(),
+                                "Week":              _wk_str,
+                                "Category":          _cat,
+                                "Summary":           _val,
+                                "Original Response": _fres["text"],
+                            })
+
+                # Manual additions for this student
+                # staff_note → Other category; force_camp → Preference category (staff reference)
+                # pairing and force_week are already captured in the Rules JSON export
+                for _me in st.session_state.y9_ft_manual_add.get(_fres["email"], []):
+                    if _me["type"] == "staff_note":
                         _ft_note_rows.append({
                             "Student":           _nm,
                             "House":             _hse.title(),
                             "Week":              _wk_str,
-                            "Category":          _cat,
-                            "Summary":           _val,
+                            "Category":          "Other",
+                            "Summary":           f"[Manual note] {_me['detail']}",
+                            "Original Response": _fres["text"],
+                        })
+                    elif _me["type"] == "force_camp":
+                        _ft_note_rows.append({
+                            "Student":           _nm,
+                            "House":             _hse.title(),
+                            "Week":              _wk_str,
+                            "Category":          "Preference",
+                            "Summary":           f"[Forced camp] {_me['detail']}",
+                            "Original Response": _fres["text"],
+                        })
+                    elif _me["type"] == "pairing":
+                        _ft_note_rows.append({
+                            "Student":           _nm,
+                            "House":             _hse.title(),
+                            "Week":              _wk_str,
+                            "Category":          "Other",
+                            "Summary":           f"[Must-Go pairing] {_me['detail']}",
+                            "Original Response": _fres["text"],
+                        })
+                    elif _me["type"] == "force_week":
+                        _ft_note_rows.append({
+                            "Student":           _nm,
+                            "House":             _hse.title(),
+                            "Week":              _wk_str,
+                            "Category":          "Logistics",
+                            "Summary":           f"[Force-week override] {_me['detail']}",
                             "Original Response": _fres["text"],
                         })
 
