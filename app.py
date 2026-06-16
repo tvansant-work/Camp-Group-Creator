@@ -59,7 +59,19 @@ if responses_file and students_file and page in ["🏕️ Y8 Group Creator", "�
 
     df_merged_full['Responded'] = df_merged_full['Email address'].notna()
 
-    valid_classes = df_resp['Which Connections class are you in? '].dropna().unique()
+    # Robustly find the Connections-class column — name can vary slightly across form exports
+    _TARGET_CLASS_COL = 'Which Connections class are you in? '
+    if _TARGET_CLASS_COL not in df_resp.columns:
+        _class_col_found = next(
+            (c for c in df_resp.columns if 'connections class' in str(c).lower()), None)
+        if _class_col_found:
+            df_resp.rename(columns={_class_col_found: _TARGET_CLASS_COL}, inplace=True)
+            if _class_col_found in df_merged_full.columns:
+                df_merged_full.rename(columns={_class_col_found: _TARGET_CLASS_COL}, inplace=True)
+        else:
+            df_resp[_TARGET_CLASS_COL] = None
+            df_merged_full[_TARGET_CLASS_COL] = None
+    valid_classes = df_resp[_TARGET_CLASS_COL].dropna().unique()
     rg_to_class = {f"8{str(c).strip()[0].upper()}": str(c).strip() for c in valid_classes}
     df_merged_full['Which Connections class are you in? '] = df_merged_full['Which Connections class are you in? '].fillna(
         df_merged_full['Rollgroup'].astype(str).str.strip().str.upper().map(rg_to_class)
@@ -1189,7 +1201,7 @@ elif page == "📋 Final Roster & Leader Builder":
 
         y9_roster_xlsx = st.file_uploader(
             "Upload your edited Y9_Journey_Groups.xlsx", type=["xlsx"], key="y9_roster_upload",
-            help="Export this file from the Y9 Journey Groups tool, adjust groups in Excel, then upload it here to build the public roster.")
+            help="Export from the Y9 Journey Groups tool, adjust groups in Excel, then upload here to build the public roster.")
 
         if y9_roster_xlsx:
             # ── Camp key lookup ────────────────────────────────────────────────────────────
@@ -1443,7 +1455,17 @@ elif page == "🏔️ Y9 Journey Groups":
                 if ch in _letter_map: return _letter_map[ch]
             return ''
         if _house_col_stud:
-            df_s['House_stud'] = df_s[_house_col_stud].astype(str).str.strip().str.lower()
+            # Student list uses two-letter abbreviations (Un, Ho, Ra, Ma) — expand to full names
+            _two_letter_map = {'un': 'unwin', 'ho': 'hodgkin', 'ra': 'ransome', 'ma': 'mather'}
+            def _expand_house_abbrev(val):
+                v = str(val).strip().lower()
+                if v in _full_house_names: return v
+                if v in _two_letter_map:   return _two_letter_map[v]
+                if v in _letter_map:       return _letter_map[v]
+                for h in _full_house_names:
+                    if h.startswith(v) and len(v) >= 2: return h
+                return v
+            df_s['House_stud'] = df_s[_house_col_stud].apply(_expand_house_abbrev)
         elif _rg_col:
             df_s['House_stud'] = df_s[_rg_col].apply(_house_from_rg)
         else:
@@ -2424,6 +2446,7 @@ elif page == "🏔️ Y9 Journey Groups":
                                     _pref_rank = _pref_w.get(_stud, {}).get(_ck, '—')
                                     _friend_str = ', '.join(_friends_raw) if _friends_raw else '—'
 
+                                    _all_prefs = _pref_w.get(_stud, {})
                                     _rows.append({
                                         'Student ID':         _sr.get('Student ID', 'N/A'),
                                         'Student':            _stud,
@@ -2432,6 +2455,11 @@ elif page == "🏔️ Y9 Journey Groups":
                                         'House':              str(_sr.get('House', '—')).title(),
                                         'Friend Requested':   _friend_str,
                                         'Pref Rank':          _pref_rank,
+                                        'MTB':                _all_prefs.get('MTB', '—'),
+                                        'CC':                 _all_prefs.get('CC', '—'),
+                                        'MM':                 _all_prefs.get('MM', '—'),
+                                        'Exp':                _all_prefs.get('Explorer', '—'),
+                                        'Chal':               _all_prefs.get('Challenger', '—'),
                                         'Phys Challenge':     _sr.get(_challenge_col, 'N/A') if _challenge_col and _resp else 'N/A',
                                         'Camping Skill':      _sr.get(_camping_col,   'N/A') if _camping_col   and _resp else 'N/A',
                                         'Overnight Hike':     _sr.get(_overnight_col, 'N/A') if _overnight_col and _resp else 'N/A',
@@ -2614,13 +2642,16 @@ elif page == "🏔️ Y9 Journey Groups":
                         if not responded and 'Responded' in cols:
                             ws.cell(row=xl_row, column=cols.index('Responded') + 1).fill = fill_yellow
 
-                        # Pref Rank colouring
-                        if 'Pref Rank' in cols:
+                        # Pref Rank colouring — assigned camp rank + all individual camp columns
+                        _PREF_COL_NAMES = ['Pref Rank', 'MTB', 'CC', 'MM', 'Exp', 'Chal']
+                        for _pc_name in _PREF_COL_NAMES:
+                            if _pc_name not in cols: continue
                             try:
-                                _pr = int(row['Pref Rank'])
-                                _pr_cell = ws.cell(row=xl_row, column=cols.index('Pref Rank') + 1)
+                                _pr = int(row[_pc_name])
+                                _pr_cell = ws.cell(row=xl_row, column=cols.index(_pc_name) + 1)
                                 if   _pr == 1: _pr_cell.fill = fill_pref1; _pr_cell.font = font_bold
                                 elif _pr == 2: _pr_cell.fill = fill_pref2
+                                elif _pr == 3: _pr_cell.fill = PatternFill("solid", fgColor="FFF3CD")
                                 elif _pr == 4: _pr_cell.fill = fill_pref4
                                 elif _pr == 5: _pr_cell.fill = fill_pref5; _pr_cell.font = font_bold
                             except (ValueError, TypeError):
@@ -2660,9 +2691,79 @@ elif page == "🏔️ Y9 Journey Groups":
                                     elif 4 <= _num <= 6: _sc_cell.fill = fill_skill_org; _sc_cell.font = font_bold
                                     elif _num >= 7:      _sc_cell.fill = fill_skill_grn
 
+                # ── Build the Overview data (snapshot of current assignments) ────────────────
+                _ov_rows = []
+                for _nm in sorted(full_lookup.keys()):
+                    _ow, _oc, _osg = full_lookup[_nm]
+                    _stud_df = df_y9_act[df_y9_act['Official Name'] == _nm]
+                    _ov_house = '—'
+                    if not _stud_df.empty:
+                        _hv = _stud_df.iloc[0].get('House', '')
+                        if pd.notna(_hv) and str(_hv).strip() not in ('', 'nan', 'None'):
+                            _ov_house = str(_hv).title()
+                    _ov_prefs  = _y9_pref_lk.get(_nm, {})
+                    _ov_rank   = _ov_prefs.get(_oc, '—')
+                    _has_b_ov  = len(all_week_results.get(_ow, {}).get(_oc, {}).get('B', [])) > 0
+                    _ov_rows.append({
+                        'Week':    _ow,
+                        'Student': _nm,
+                        'House':   _ov_house,
+                        'Camp':    Y9_CAMP_DEFS.get(_oc, {}).get('label', _oc),
+                        'Group':   _osg if _has_b_ov else '—',
+                        'Rank':    _ov_rank,
+                        'MTB':     _ov_prefs.get('MTB', '—'),
+                        'CC':      _ov_prefs.get('CC', '—'),
+                        'MM':      _ov_prefs.get('MM', '—'),
+                        'Exp':     _ov_prefs.get('Explorer', '—'),
+                        'Chal':    _ov_prefs.get('Challenger', '—'),
+                    })
+                _ov_rows.sort(key=lambda r: (r['Week'], r['Camp'], r['Student']))
+                _df_overview = pd.DataFrame(_ov_rows) if _ov_rows else pd.DataFrame()
+
                 _y9_out = io.BytesIO()
                 with pd.ExcelWriter(_y9_out, engine='openpyxl') as _writer:
-                    # Ordered sheets: by camp type, then week, then subgroup
+
+                    # ── Sheet 0: Overview (first / active sheet) ──────────────────────────
+                    if not _df_overview.empty:
+                        _df_overview.to_excel(_writer, sheet_name='Overview', index=False)
+                        _ws_ov = _writer.sheets['Overview']
+                        from openpyxl.styles import PatternFill as _PF, Font as _Font, Alignment as _Align
+                        _fill_hdr_ov  = _PF("solid", fgColor="4472C4")
+                        _fill_w1_ov   = _PF("solid", fgColor="DDEEFF")
+                        _fill_w2_ov   = _PF("solid", fgColor="FFE8CC")
+                        _fill_p1_ov   = _PF("solid", fgColor="C8F7C5")
+                        _fill_p2_ov   = _PF("solid", fgColor="E8F8C5")
+                        _fill_p3_ov   = _PF("solid", fgColor="FFF3CD")
+                        _fill_p4_ov   = _PF("solid", fgColor="FFD9A0")
+                        _fill_p5_ov   = _PF("solid", fgColor="FFB3B3")
+                        _font_hdr_ov  = _Font(bold=True, color="FFFFFF")
+                        _font_bold_ov = _Font(bold=True)
+                        _ov_cols = list(_df_overview.columns)
+                        _pref_col_names_ov = ['Rank', 'MTB', 'CC', 'MM', 'Exp', 'Chal']
+                        _pref_fills_ov = {1: _fill_p1_ov, 2: _fill_p2_ov, 3: _fill_p3_ov,
+                                          4: _fill_p4_ov, 5: _fill_p5_ov}
+                        for ci in range(1, len(_ov_cols) + 1):
+                            _c = _ws_ov.cell(row=1, column=ci)
+                            _c.fill = _fill_hdr_ov; _c.font = _font_hdr_ov
+                        for xl_r, (_, ov_row) in enumerate(_df_overview.iterrows(), start=2):
+                            _wk_fill = _fill_w1_ov if ov_row['Week'] == 1 else _fill_w2_ov
+                            for ci in range(1, len(_ov_cols) + 1):
+                                _ws_ov.cell(row=xl_r, column=ci).fill = _wk_fill
+                            for _pcn in _pref_col_names_ov:
+                                if _pcn not in _ov_cols: continue
+                                try:
+                                    _pr_v = int(ov_row[_pcn])
+                                    _pr_c = _ws_ov.cell(row=xl_r, column=_ov_cols.index(_pcn) + 1)
+                                    _pr_c.fill = _pref_fills_ov[_pr_v]
+                                    if _pr_v in (1, 5): _pr_c.font = _font_bold_ov
+                                except (ValueError, TypeError, KeyError):
+                                    pass
+                        for _col in _ws_ov.columns:
+                            _ws_ov.column_dimensions[_col[0].column_letter].width = min(
+                                max((len(str(c.value or '')) for c in _col), default=6) + 2, 40)
+                        _ws_ov.protection.sheet = True
+
+                    # ── Ordered sheets: by camp type, then week, then subgroup
                     _ordered_sheets = sorted(
                         _export_sheets.keys(),
                         key=lambda nm: (
@@ -2928,7 +3029,17 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         return ""
 
     if _ft_house_col_s:
-        _ft_df_s["House"] = _ft_df_s[_ft_house_col_s].astype(str).str.strip().str.lower()
+        # Student list uses two-letter abbreviations (Un, Ho, Ra, Ma) — expand to full names
+        _ft_two_letter_map = {'un': 'unwin', 'ho': 'hodgkin', 'ra': 'ransome', 'ma': 'mather'}
+        def _ft_expand_house_abbrev(val):
+            v = str(val).strip().lower()
+            if v in _ft_full_houses:     return v
+            if v in _ft_two_letter_map:  return _ft_two_letter_map[v]
+            if v in _ft_letter_map:      return _ft_letter_map[v]
+            for h in _ft_full_houses:
+                if h.startswith(v) and len(v) >= 2: return h
+            return v
+        _ft_df_s["House"] = _ft_df_s[_ft_house_col_s].apply(_ft_expand_house_abbrev)
     elif _ft_rg_col:
         _ft_df_s["House"] = _ft_df_s[_ft_rg_col].apply(_ft_house_from_rg)
     else:
