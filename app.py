@@ -2645,6 +2645,52 @@ elif page == "🏔️ Y9 Journey Groups":
                         })
                     break
 
+        # ── RULE VIOLATION CHECK ─────────────────────────────────────────────────────────
+        _rule_violations = []
+
+        # 1. Separation violations: students who should be apart ended up in same group
+        for _sv_a, _sv_b in st.session_state.y9_sep:
+            _dest_a = full_lookup.get(_sv_a)
+            _dest_b = full_lookup.get(_sv_b)
+            if _dest_a and _dest_b and _dest_a == _dest_b:
+                _wk_lbl = 'Week 1' if _dest_a[0] == 1 else 'Week 2'
+                _camp_lbl = Y9_CAMP_DEFS.get(_dest_a[1], {}).get('label', _dest_a[1])
+                _sg_lbl = f' — Group {_dest_a[2]}' if _dest_a[2] != 'A' or len(all_week_results.get(_dest_a[0], {}).get(_dest_a[1], {}).get('B', [])) > 0 else ''
+                _rule_violations.append(
+                    f"🚫 **Separation rule broken**: {_sv_a} and {_sv_b} are both in "
+                    f"{_wk_lbl} · {_camp_lbl}{_sg_lbl}")
+
+        # 2. Must-go-together violations: students who must be together ended up apart
+        for _mv_a, _mv_b in st.session_state.y9_must:
+            _dest_a = full_lookup.get(_mv_a)
+            _dest_b = full_lookup.get(_mv_b)
+            if _dest_a and _dest_b and _dest_a != _dest_b:
+                if _dest_a[0] != _dest_b[0]:
+                    _diff_reason = 'different weeks (different house groups)'
+                elif _dest_a[1] != _dest_b[1]:
+                    _c_a = Y9_CAMP_DEFS.get(_dest_a[1], {}).get('label', _dest_a[1])
+                    _c_b = Y9_CAMP_DEFS.get(_dest_b[1], {}).get('label', _dest_b[1])
+                    _diff_reason = f'different camps ({_c_a} vs {_c_b})'
+                else:
+                    _diff_reason = f'same camp but different subgroups (Group {_dest_a[2]} vs Group {_dest_b[2]})'
+                _rule_violations.append(
+                    f"🔗 **Must-go-together rule broken**: {_mv_a} and {_mv_b} ended up in {_diff_reason}")
+
+        # 3. Forced-camp violations: student ended up in a different camp than forced
+        for _fv_s, _fv_c in st.session_state.y9_force.items():
+            _dest = full_lookup.get(_fv_s)
+            if _dest and _dest[1] != _fv_c:
+                _forced_lbl = Y9_CAMP_DEFS.get(_fv_c,    {}).get('label', _fv_c)
+                _actual_lbl = Y9_CAMP_DEFS.get(_dest[1], {}).get('label', _dest[1])
+                _rule_violations.append(
+                    f"📌 **Force-camp rule broken**: {_fv_s} was forced to {_forced_lbl} "
+                    f"but ended up in {_actual_lbl} — this usually means the camp was full")
+
+        if _rule_violations:
+            st.error("⚠️ **The following staff rules could not be satisfied** — manual adjustment may be needed:")
+            for _v in _rule_violations:
+                st.error(_v)
+
         # ── CAMP CONFIG SUMMARY ───────────────────────────────────────────────────────────
         st.markdown("---")
         st.subheader("📊 Camp Configuration")
@@ -2804,7 +2850,7 @@ elif page == "🏔️ Y9 Journey Groups":
                                         for _a, _b in st.session_state.y9_sep:
                                             if row['Student'] in (_a, _b):
                                                 _other = _b if row['Student'] == _a else _a
-                                                if fl.get(_other) == (wk, ck, _sg):
+                                                if fl.get(_other, (None, None, None))[:2] == (wk, ck):
                                                     colors[_s_idx] = 'background-color: #ff4d4d; color: white; font-weight: bold'
 
                                         # Skill columns: colour numeric values
@@ -2961,7 +3007,7 @@ elif page == "🏔️ Y9 Journey Groups":
                             if _f_str and _f_str != '—':
                                 _fl_list = [f.strip() for f in _f_str.split(',')]
                                 _all_together = all(
-                                    full_lk.get(f) == (_wk_xl, _ck_xl, _sg_xl)
+                                    full_lk.get(f, (None, None, None))[:2] == (_wk_xl, _ck_xl)
                                     for f in _fl_list)
                                 if not _all_together:
                                     ws.cell(row=xl_row, column=cols.index('Friend Requested') + 1).fill = fill_pink
@@ -2973,7 +3019,7 @@ elif page == "🏔️ Y9 Journey Groups":
                             for _a, _b in sep_pairs:
                                 if student in (_a, _b):
                                     _other = _b if student == _a else _a
-                                    if full_lk.get(_other) == (_wk_xl, _ck_xl, _sg_xl):
+                                    if full_lk.get(_other, (None, None, None))[:2] == (_wk_xl, _ck_xl):
                                         s_cell = ws.cell(row=xl_row, column=cols.index('Student') + 1)
                                         s_cell.fill = fill_red; s_cell.font = font_bold_white
 
