@@ -2653,9 +2653,10 @@ elif page == "🏔️ Y9 Journey Groups":
             _dest_a = full_lookup.get(_sv_a)
             _dest_b = full_lookup.get(_sv_b)
             if _dest_a and _dest_b and _dest_a == _dest_b:
-                _wk_lbl = 'Week 1' if _dest_a[0] == 1 else 'Week 2'
+                _wk_lbl   = 'Week 1' if _dest_a[0] == 1 else 'Week 2'
                 _camp_lbl = Y9_CAMP_DEFS.get(_dest_a[1], {}).get('label', _dest_a[1])
-                _sg_lbl = f' — Group {_dest_a[2]}' if _dest_a[2] != 'A' or len(all_week_results.get(_dest_a[0], {}).get(_dest_a[1], {}).get('B', [])) > 0 else ''
+                _has_b    = len(all_week_results.get(_dest_a[0], {}).get(_dest_a[1], {}).get('B', [])) > 0
+                _sg_lbl   = f' — Group {_dest_a[2]}' if _has_b else ''
                 _rule_violations.append(
                     f"🚫 **Separation rule broken**: {_sv_a} and {_sv_b} are both in "
                     f"{_wk_lbl} · {_camp_lbl}{_sg_lbl}")
@@ -2850,7 +2851,7 @@ elif page == "🏔️ Y9 Journey Groups":
                                         for _a, _b in st.session_state.y9_sep:
                                             if row['Student'] in (_a, _b):
                                                 _other = _b if row['Student'] == _a else _a
-                                                if fl.get(_other, (None, None, None))[:2] == (wk, ck):
+                                                if fl.get(_other) == (wk, ck, _sg):
                                                     colors[_s_idx] = 'background-color: #ff4d4d; color: white; font-weight: bold'
 
                                         # Skill columns: colour numeric values
@@ -3007,7 +3008,7 @@ elif page == "🏔️ Y9 Journey Groups":
                             if _f_str and _f_str != '—':
                                 _fl_list = [f.strip() for f in _f_str.split(',')]
                                 _all_together = all(
-                                    full_lk.get(f, (None, None, None))[:2] == (_wk_xl, _ck_xl)
+                                    full_lk.get(f) == (_wk_xl, _ck_xl, _sg_xl)
                                     for f in _fl_list)
                                 if not _all_together:
                                     ws.cell(row=xl_row, column=cols.index('Friend Requested') + 1).fill = fill_pink
@@ -3019,7 +3020,7 @@ elif page == "🏔️ Y9 Journey Groups":
                             for _a, _b in sep_pairs:
                                 if student in (_a, _b):
                                     _other = _b if student == _a else _a
-                                    if full_lk.get(_other, (None, None, None))[:2] == (_wk_xl, _ck_xl):
+                                    if full_lk.get(_other) == (_wk_xl, _ck_xl, _sg_xl):
                                         s_cell = ws.cell(row=xl_row, column=cols.index('Student') + 1)
                                         s_cell.fill = fill_red; s_cell.font = font_bold_white
 
