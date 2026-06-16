@@ -2604,16 +2604,23 @@ elif page == "🏔️ Y9 Journey Groups":
             _friends = all_friend_reqs.get(_nm, [])
             if not _friends: continue
             for _f in _friends:
-                if full_lookup.get(_f, (None, None, None))[:2] != (_fw, _fc):
+                _f_dest = full_lookup.get(_f)
+                # Two students are truly together only if they share week, camp AND subgroup.
+                # Comparing only [:2] would falsely treat Group A and Group B of the same
+                # camp as "together" — so we compare the full 3-tuple.
+                _truly_together = _f_dest is not None and _f_dest == (_fw, _fc, _fsg)
+                if not _truly_together:
                     if _nm not in _seen_iso:
                         _seen_iso.add(_nm)
-                        _f_dest = full_lookup.get(_f)
                         # Determine the most likely reason they weren't placed together
                         if not _f_dest:
                             _iso_why = "Friend not placed — check their house/week data"
                         elif _f_dest[0] != _fw:
                             _f_wk_lbl = "Week 1 (Unwin & Hodgkin)" if _f_dest[0] == 1 else "Week 2 (Mather & Ransome)"
                             _iso_why = f"Friend is in a different week ({_f_wk_lbl}) — different house group"
+                        elif _f_dest[1] == _fc and _f_dest[2] != _fsg:
+                            # Same camp, same week — but split into different subgroups
+                            _iso_why = f"Both in {Y9_CAMP_DEFS[_fc]['label']} but split into Group {_fsg} vs Group {_f_dest[2]} — subgroup balancing"
                         elif any(({_nm, _f} == {a, b}) for a, b in st.session_state.y9_sep):
                             _iso_why = "Separation rule applied by staff"
                         elif _f in st.session_state.y9_force and st.session_state.y9_force[_f] != _fc:
@@ -2631,9 +2638,9 @@ elif page == "🏔️ Y9 Journey Groups":
                         isolated_y9.append({
                             'Week': _fw,
                             'Student': _nm,
-                            'Assigned Camp': Y9_CAMP_DEFS[_fc]['label'],
+                            'Assigned Camp': Y9_CAMP_DEFS[_fc]['label'] + (f' — Group {_fsg}' if _f_dest and _f_dest[1] == _fc and _f_dest[2] != _fsg else ''),
                             'Friend Requested': _f,
-                            'Friend\'s Camp': Y9_CAMP_DEFS[_f_dest[1]]['label'] if _f_dest else 'Not placed',
+                            'Friend\'s Camp': (Y9_CAMP_DEFS[_f_dest[1]]['label'] + (f' — Group {_f_dest[2]}' if _f_dest[1] == _fc else '')) if _f_dest else 'Not placed',
                             'Why': _iso_why,
                         })
                     break
@@ -2785,8 +2792,9 @@ elif page == "🏔️ Y9 Journey Groups":
                                         _f_str = str(row.get('Friend Requested', ''))
                                         if _f_str and _f_str != '—':
                                             _fl_list = [f.strip() for f in _f_str.split(',')]
+                                            # Must share week, camp AND subgroup to be truly together
                                             _all_together = all(
-                                                fl.get(f, (None, None, None))[:2] == (wk, ck)
+                                                fl.get(f) == (wk, ck, _sg)
                                                 for f in _fl_list)
                                             if not _all_together:
                                                 colors[_f_idx] = 'background-color: #ffcccc'
@@ -2874,10 +2882,14 @@ elif page == "🏔️ Y9 Journey Groups":
 
                 def _apply_y9_excel_colors(ws, df_data, sheet_name, full_lk, sep_pairs, find_name, include_drafts):
                     """Apply on-screen highlight colours to a Y9 camp group sheet."""
-                    # Parse sheet name to get camp key and week:  e.g. MTB_W1, CC_A_W2
+                    # Parse sheet name to get camp key, subgroup and week.
+                    # Formats: MTB_W1 (no B group → always subgroup A)
+                    #          CC_A_W2 or CC_B_W2 (split into A and B)
                     _parts = sheet_name.split('_')
                     _ck_xl  = _parts[0]
                     _wk_xl  = int(_parts[-1].replace('W', '')) if _parts[-1].startswith('W') else None
+                    # Middle part is the subgroup when present (e.g. 'A' or 'B')
+                    _sg_xl  = _parts[1] if len(_parts) == 3 and _parts[1] in ('A', 'B') else 'A'
 
                     fill_blue_hdr   = PatternFill("solid", fgColor="4472C4")
                     fill_green      = PatternFill("solid", fgColor="85E085")
