@@ -3169,8 +3169,80 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
     st.sidebar.header("📂 FT Analyser: Existing Rules")
     _ft_rules_upload = st.sidebar.file_uploader(
         "Load Existing Y9 Rules JSON (optional)",
-        type=["json"], key="y9_ft_rules_upload"
+        type=["json"], key="y9_ft_rules_upload",
+        help="Upload your existing y9_camp_rules.json to see which rules already apply to each student, preventing doubles."
     )
+
+    # Load the rules once into session state so they persist across reruns
+    if _ft_rules_upload is not None:
+        _ft_rules_file_id = getattr(_ft_rules_upload, 'file_id', str(id(_ft_rules_upload)))
+        if st.session_state.get('_ft_loaded_rules_id') != _ft_rules_file_id:
+            try:
+                _ft_rules_upload.seek(0)
+                _loaded_base = json.load(_ft_rules_upload)
+                st.session_state['_ft_loaded_rules'] = _loaded_base
+                st.session_state['_ft_loaded_rules_id'] = _ft_rules_file_id
+                _n_must_loaded  = len(_loaded_base.get('must', []))
+                _n_force_loaded = len(_loaded_base.get('force', {}))
+                _n_fwk_loaded   = len(_loaded_base.get('force_week', {}))
+                _n_na_loaded    = len(_loaded_base.get('na', []))
+                st.sidebar.success(
+                    f"✅ Rules loaded: {_n_must_loaded} must-go, "
+                    f"{_n_force_loaded} force-camp, {_n_fwk_loaded} force-week, "
+                    f"{_n_na_loaded} not-attending")
+            except Exception:
+                st.sidebar.error("❌ Could not parse the uploaded rules JSON.")
+                st.session_state['_ft_loaded_rules'] = {}
+    elif '_ft_loaded_rules' not in st.session_state:
+        st.session_state['_ft_loaded_rules'] = {}
+
+    _ft_existing_rules = st.session_state.get('_ft_loaded_rules', {})
+    if _ft_existing_rules:
+        _n_must_ex  = len(_ft_existing_rules.get('must', []))
+        _n_force_ex = len(_ft_existing_rules.get('force', {}))
+        _n_fwk_ex   = len(_ft_existing_rules.get('force_week', {}))
+        _n_na_ex    = len(_ft_existing_rules.get('na', []))
+        st.sidebar.info(
+            f"📋 **Active rules in memory:**  \n"
+            f"• {_n_must_ex} must-go pairs  \n"
+            f"• {_n_force_ex} force-camp  \n"
+            f"• {_n_fwk_ex} force-week  \n"
+            f"• {_n_na_ex} not-attending"
+        )
+        if st.sidebar.button("🗑️ Clear loaded rules", key="y9_ft_clear_rules"):
+            st.session_state['_ft_loaded_rules'] = {}
+            st.session_state.pop('_ft_loaded_rules_id', None)
+            st.rerun()
+
+    # Per-student rule lookup helper
+    def _ft_rules_for_student(student_name, rules_dict):
+        """Return a dict of rule categories that apply to this student."""
+        out = {}
+        my_must = [
+            (b if student_name == a else a)
+            for pair in rules_dict.get('must', [])
+            if len(pair) == 2
+            for a, b in [(pair[0], pair[1])]
+            if student_name in (a, b)
+        ]
+        if my_must:
+            out['must_go'] = my_must
+        if student_name in rules_dict.get('force', {}):
+            out['force_camp'] = rules_dict['force'][student_name]
+        if student_name in rules_dict.get('force_week', {}):
+            out['force_week'] = rules_dict['force_week'][student_name]
+        my_sep = [
+            (b if student_name == a else a)
+            for pair in rules_dict.get('sep', [])
+            if len(pair) == 2
+            for a, b in [(pair[0], pair[1])]
+            if student_name in (a, b)
+        ]
+        if my_sep:
+            out['sep'] = my_sep
+        if student_name in rules_dict.get('na', []):
+            out['not_attending'] = True
+        return out
 
     # ── Title ─────────────────────────────────────────────────────────────────────────────
     st.title("🔍 Y9 Free Text Analyser")
@@ -3448,6 +3520,27 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
             _expand_default = "medical" in _fl or "concern" in _fl
 
             with st.expander(_card_label, expanded=_expand_default):
+                # ── Existing rules for this student ───────────────────────────────────────
+                _existing_for_student = _ft_rules_for_student(_fres["name"], _ft_existing_rules)
+                if _existing_for_student:
+                    _rule_parts = []
+                    if _existing_for_student.get('not_attending'):
+                        _rule_parts.append("🚫 **Marked Not Attending**")
+                    if _existing_for_student.get('must_go'):
+                        _partners = ", ".join(_existing_for_student['must_go'])
+                        _rule_parts.append(f"🤝 **Must-Go with:** {_partners}")
+                    if _existing_for_student.get('sep'):
+                        _partners = ", ".join(_existing_for_student['sep'])
+                        _rule_parts.append(f"⚠️ **Can't-Go with:** {_partners}")
+                    if _existing_for_student.get('force_camp'):
+                        _rule_parts.append(f"🏕️ **Forced to camp:** {_existing_for_student['force_camp']}")
+                    if _existing_for_student.get('force_week'):
+                        _rule_parts.append(f"📅 **Forced to Week:** {_existing_for_student['force_week']}")
+                    st.warning(
+                        "**📋 Rules already on file for this student — check before adding more:**  \n"
+                        + "  \n".join(_rule_parts)
+                    )
+
                 st.info(f"📝 **Original response:** {_fres['text']}")
                 _ll = _fres["llm"]
 
@@ -3747,41 +3840,92 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
 
         # ── Exports ───────────────────────────────────────────────────────────────────────
         st.subheader("📥 Exports")
+
+        # ── Live rules summary (always visible, no re-upload needed) ─────────────────────
+        # Build the combined ruleset from: loaded base + new rules from this session
+        _ft_base = {
+            "sep": [], "must": [], "force": {}, "force_week": {},
+            "na": [], "na_details": [], "include_drafts": False, "weights": {}
+        }
+        # Start from in-session loaded rules (persists even without the file widget)
+        for _jk in _ft_base:
+            if _jk in _ft_existing_rules:
+                import copy as _copy
+                _ft_base[_jk] = _copy.deepcopy(_ft_existing_rules[_jk])
+
+        # Merge new must-go rules from this session (deduplicated)
+        _existing_must_set = {tuple(sorted(p)) for p in _ft_base["must"]}
+        for _ma, _mb in st.session_state.y9_ft_new_must:
+            _pk = tuple(sorted([_ma, _mb]))
+            if _pk not in _existing_must_set:
+                _ft_base["must"].append([_ma, _mb])
+                _existing_must_set.add(_pk)
+
+        # Merge new force-week overrides
+        for _fw_nm, _fw_wk in st.session_state.y9_ft_new_force_week.items():
+            _ft_base["force_week"][_fw_nm] = _fw_wk
+
+        # Count new rules added this session
+        _n_new_must  = len(st.session_state.y9_ft_new_must)
+        _n_new_fwk   = len(st.session_state.y9_ft_new_force_week)
+        _n_base_must = len(_ft_existing_rules.get('must', []))
+        _n_base_fwk  = len(_ft_existing_rules.get('force_week', {}))
+
+        # Progress bar — show how many cards have been reviewed
+        _n_reviewed = sum(
+            1 for _r in _ft_actionable
+            if any(
+                st.session_state.y9_ft_friend_dec.get((_r['email'], _raw_nm)) is not None
+                for _raw_nm in (_r['llm'].get('extra_friends') or [])
+            )
+            or st.session_state.y9_ft_perm_dec.get((_r['email'], 'perm')) is not None
+            or any(
+                st.session_state.y9_ft_staff_ticks.get((_r['email'], fld), False)
+                for fld in ['medical_notes', 'concern_notes', 'tent_notes',
+                             'preference_notes', 'equipment_notes', 'logistics_notes', 'other_notes']
+            )
+        )
+        _n_total_cards = len(_ft_actionable)
+
+        _rules_status_cols = st.columns([2, 1, 1, 1])
+        with _rules_status_cols[0]:
+            st.progress(
+                _n_reviewed / max(_n_total_cards, 1),
+                text=f"Cards reviewed: {_n_reviewed} / {_n_total_cards}"
+            )
+        _rules_status_cols[1].metric(
+            "Must-Go rules", len(_ft_base['must']),
+            delta=f"+{_n_new_must} new" if _n_new_must else None)
+        _rules_status_cols[2].metric(
+            "Force-Week rules", len(_ft_base['force_week']),
+            delta=f"+{_n_new_fwk} new" if _n_new_fwk else None)
+        _rules_status_cols[3].metric(
+            "Total rules in export",
+            len(_ft_base['must']) + len(_ft_base['force_week']) + len(_ft_base.get('sep', []))
+        )
+
+        if _n_new_must or _n_new_fwk:
+            with st.expander(f"✏️ Preview {_n_new_must + _n_new_fwk} new rule(s) added this session"):
+                if st.session_state.y9_ft_new_must:
+                    st.write("**New Must-Go pairs:**")
+                    for _ma, _mb in st.session_state.y9_ft_new_must:
+                        st.write(f"  • {_ma} + {_mb}")
+                if st.session_state.y9_ft_new_force_week:
+                    st.write("**New Force-Week overrides:**")
+                    for _fn, _fw in st.session_state.y9_ft_new_force_week.items():
+                        st.write(f"  • {_fn} → Week {_fw}")
+
+        st.markdown("---")
         _exp_c1, _exp_c2 = st.columns(2)
 
         # ── Export 1: Combined Rules JSON ─────────────────────────────────────────────────
         with _exp_c1:
             st.markdown("**Export 1 — Combined Rules JSON**")
             st.caption(
-                "Merges your accepted rules with any existing JSON. "
-                "Load the result directly into the Y9 Journey Groups tool."
+                "Merges base rules + all new rules accepted this session. "
+                "Load the result directly into the Y9 Journey Groups tool. "
+                "**No need to re-upload** — the export always reflects the current state."
             )
-
-            _ft_base = {
-                "sep": [], "must": [], "force": {}, "force_week": {},
-                "na": [], "na_details": [], "include_drafts": False, "weights": {}
-            }
-            if _ft_rules_upload is not None:
-                try:
-                    _ft_rules_upload.seek(0)
-                    _loaded_rules = json.load(_ft_rules_upload)
-                    for _jk in _ft_base:
-                        if _jk in _loaded_rules:
-                            _ft_base[_jk] = _loaded_rules[_jk]
-                except Exception:
-                    st.warning("⚠️ Could not parse the uploaded rules JSON — starting from empty.")
-
-            # Append new must rules (deduplicated)
-            _existing_must_set = {tuple(sorted(p)) for p in _ft_base["must"]}
-            for _ma, _mb in st.session_state.y9_ft_new_must:
-                _pk = tuple(sorted([_ma, _mb]))
-                if _pk not in _existing_must_set:
-                    _ft_base["must"].append([_ma, _mb])
-                    _existing_must_set.add(_pk)
-
-            # Append force-week overrides (deduplicated / override existing)
-            for _fw_nm, _fw_wk in st.session_state.y9_ft_new_force_week.items():
-                _ft_base["force_week"][_fw_nm] = _fw_wk
 
             st.download_button(
                 "📥 Export Combined Rules JSON",
@@ -3791,18 +3935,6 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                 use_container_width=True,
                 key="y9_ft_dl_json"
             )
-
-            # Quick preview of new rules
-            if st.session_state.y9_ft_new_must or st.session_state.y9_ft_new_force_week:
-                with st.expander("Preview new rules being added"):
-                    if st.session_state.y9_ft_new_must:
-                        st.write("**New Must-Go pairs:**")
-                        for _ma, _mb in st.session_state.y9_ft_new_must:
-                            st.write(f"  • {_ma} + {_mb}")
-                    if st.session_state.y9_ft_new_force_week:
-                        st.write("**New Force-Week overrides:**")
-                        for _fn, _fw in st.session_state.y9_ft_new_force_week.items():
-                            st.write(f"  • {_fn} → Week {_fw}")
 
         # ── Export 2: Staff Notes Excel ───────────────────────────────────────────────────
         with _exp_c2:
