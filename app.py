@@ -1312,10 +1312,11 @@ elif page == "📋 Final Roster & Leader Builder":
                             _col_headers.append((_ck, 'B', _col_idx)); _col_idx += 1
                         else:
                             _col_headers.append((_ck, 'A', _col_idx)); _col_idx += 1
-                    _total_cols = _col_idx - 1
+                    _total_cols = max(_col_idx - 1, 1)
 
                     # Row 1: Week header spanning all columns
-                    _ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=_total_cols)
+                    if _total_cols > 1:
+                        _ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=_total_cols)
                     _wh = _ws.cell(row=1, column=1, value=_wk_label)
                     _wh.font = _header_font; _wh.fill = _week_fill; _wh.alignment = _center
 
@@ -1362,6 +1363,167 @@ elif page == "📋 Final Roster & Leader Builder":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
+
+                # ── Y9 Leader Overview ─────────────────────────────────────────────────────
+                st.markdown("---")
+                st.subheader("🛡️ Y9 Leader Overview")
+                st.caption("Organised by week → camp → group, with skill ratings colour-coded for easy scanning.")
+
+                _y9_skill_cols = [
+                    'Phys Challenge', 'Camping Skill', 'Overnight Hike',
+                    'Hardship Response', 'Swimming', 'White Water', 'Group Teamwork',
+                ]
+
+                # Sort sheets: by week first, then camp order, then subgroup
+                def _ldr_sort_key(sn):
+                    _p = sn.split('_')
+                    _ck_s = _p[0]
+                    _wk_s = _p[-1].replace('W', '')
+                    _sg_s = _p[1] if len(_p) == 3 else 'A'
+                    _ci_s = (list(_Y9R_CAMP_LABELS.keys()).index(_ck_s)
+                             if _ck_s in _Y9R_CAMP_LABELS else 99)
+                    return (_wk_s, _ci_s, _sg_s)
+
+                _ldr_sheets = sorted(
+                    [s for s in _sheets_y9r if s not in ('Overview',)],
+                    key=_ldr_sort_key
+                )
+
+                _ldr_rows = []
+                for _sn in _ldr_sheets:
+                    _lp = _sn.split('_')
+                    _ck_l  = _lp[0] if _lp else ''
+                    _wk_l  = _lp[-1].replace('W', '') if _lp else ''
+                    _sg_l  = _lp[1] if len(_lp) == 3 else 'A'
+                    _camp_l = _Y9R_CAMP_LABELS.get(_ck_l, _ck_l)
+                    _wklbl_l = _WEEK_LABELS.get(_wk_l, f'Week {_wk_l}')
+                    _grp_l   = (f' — Group {_sg_l}'
+                                if any(s.startswith(_ck_l + '_') and s != _sn and _wk_l in s
+                                       for s in _ldr_sheets)
+                                else '')
+
+                    # Separator row
+                    _sep = {'Week': _wklbl_l, 'Camp': _camp_l, 'Group': _sg_l,
+                            'Student': f'--- {_camp_l}{_grp_l} ({_wklbl_l}) ---',
+                            'House': '---', 'Responded': '---'}
+                    for _sc in _y9_skill_cols:
+                        _sep[_sc] = '---'
+                    _ldr_rows.append(_sep)
+
+                    _df_sn = pd.read_excel(_xls_y9r, sheet_name=_sn)
+                    for _, _sr in _df_sn.iterrows():
+                        _nm_l = str(_sr.get('Student', '')).strip()
+                        if not _nm_l or _nm_l.lower() in ('nan', ''):
+                            continue
+                        _row_l = {
+                            'Week':      _wklbl_l,
+                            'Camp':      _camp_l,
+                            'Group':     _sg_l,
+                            'Student':   _nm_l,
+                            'House':     str(_sr.get('House', '—')).strip(),
+                            'Responded': str(_sr.get('Responded', '—')),
+                        }
+                        for _sc in _y9_skill_cols:
+                            _row_l[_sc] = (_sr.get(_sc, 'N/A')
+                                           if _sc in _df_sn.columns else 'N/A')
+                        _ldr_rows.append(_row_l)
+
+                if _ldr_rows:
+                    _df_ldr = pd.DataFrame(_ldr_rows)
+                    _ldr_col_order = (['Week', 'Camp', 'Group', 'Student', 'House', 'Responded']
+                                      + _y9_skill_cols)
+                    _ldr_col_order = [c for c in _ldr_col_order if c in _df_ldr.columns]
+                    _df_ldr = _df_ldr[_ldr_col_order]
+
+                    # Preview
+                    def _hl_ldr_y9(row, df_ref):
+                        colors = [''] * len(row)
+                        if '---' in str(row.get('Student', '')):
+                            return ['background-color: #d9d9d9; font-weight: bold'] * len(row)
+                        if str(row.get('Responded', '')).strip().lower() == 'no':
+                            ri = df_ref.columns.get_loc('Responded')
+                            colors[ri] = 'background-color: #ffffcc'
+                        for _sc in _y9_skill_cols:
+                            if _sc not in df_ref.columns: continue
+                            _m = re.search(r'^\s*([1-9][0-9]?)(?:\D|$)', str(row.get(_sc, '')).strip())
+                            if _m:
+                                _n = int(_m.group(1))
+                                _i = df_ref.columns.get_loc(_sc)
+                                if   1 <= _n <= 3: colors[_i] = 'background-color: #a83232; color: white; font-weight: bold'
+                                elif 4 <= _n <= 6: colors[_i] = 'background-color: #ff9933; color: black; font-weight: bold'
+                                elif _n >= 7:      colors[_i] = 'background-color: #c8f7c5; color: black'
+                        return colors
+
+                    _styled_ldr = _df_ldr.style.apply(_hl_ldr_y9, df_ref=_df_ldr, axis=1)
+                    st.dataframe(_styled_ldr, use_container_width=True, hide_index=True)
+
+                    # Excel export
+                    _ldr_out = io.BytesIO()
+                    _ldr_wb  = Workbook()
+                    _ldr_ws  = _ldr_wb.active
+                    _ldr_ws.title = "Leader Overview"
+
+                    for _ci_l, _col_l in enumerate(_ldr_col_order, 1):
+                        _c = _ldr_ws.cell(row=1, column=_ci_l, value=_col_l)
+                        _c.fill = PatternFill("solid", fgColor="4472C4")
+                        _c.font = Font(bold=True, color="FFFFFF")
+                        _c.alignment = Alignment(horizontal="center", vertical="center")
+
+                    _f_sep  = PatternFill("solid", fgColor="D9D9D9")
+                    _f_red  = PatternFill("solid", fgColor="A83232")
+                    _f_org  = PatternFill("solid", fgColor="FF9933")
+                    _f_grn  = PatternFill("solid", fgColor="C8F7C5")
+                    _f_yel  = PatternFill("solid", fgColor="FFFFCC")
+                    _fb     = Font(bold=True)
+                    _fbw    = Font(bold=True, color="FFFFFF")
+
+                    for _ri_l, (_, _rw_l) in enumerate(_df_ldr.iterrows(), 2):
+                        for _ci_l, _col_l in enumerate(_ldr_col_order, 1):
+                            _cell_l = _ldr_ws.cell(row=_ri_l, column=_ci_l,
+                                                    value=_rw_l.get(_col_l, ''))
+                            _cell_l.alignment = Alignment(horizontal="left", vertical="center",
+                                                           wrap_text=True)
+
+                        if '---' in str(_rw_l.get('Student', '')):
+                            for _ci_l in range(1, len(_ldr_col_order) + 1):
+                                _ldr_ws.cell(row=_ri_l, column=_ci_l).fill = _f_sep
+                                _ldr_ws.cell(row=_ri_l, column=_ci_l).font = _fb
+                            continue
+
+                        if str(_rw_l.get('Responded', '')).strip().lower() == 'no':
+                            if 'Responded' in _ldr_col_order:
+                                _ldr_ws.cell(row=_ri_l,
+                                             column=_ldr_col_order.index('Responded') + 1).fill = _f_yel
+
+                        for _sc in _y9_skill_cols:
+                            if _sc not in _ldr_col_order: continue
+                            _m = re.search(r'^\s*([1-9][0-9]?)(?:\D|$)',
+                                           str(_rw_l.get(_sc, '')).strip())
+                            if _m:
+                                _n = int(_m.group(1))
+                                _sc_c = _ldr_ws.cell(row=_ri_l,
+                                                      column=_ldr_col_order.index(_sc) + 1)
+                                if   1 <= _n <= 3: _sc_c.fill = _f_red; _sc_c.font = _fbw
+                                elif 4 <= _n <= 6: _sc_c.fill = _f_org; _sc_c.font = _fb
+                                elif _n >= 7:      _sc_c.fill = _f_grn
+
+                    _ldr_widths = {
+                        'Week': 36, 'Camp': 32, 'Group': 8, 'Student': 22,
+                        'House': 12, 'Responded': 11,
+                    }
+                    for _ci_l, _col_l in enumerate(_ldr_col_order, 1):
+                        _ldr_ws.column_dimensions[get_column_letter(_ci_l)].width = \
+                            _ldr_widths.get(_col_l, 18)
+
+                    _ldr_wb.save(_ldr_out)
+                    _ldr_out.seek(0)
+                    st.download_button(
+                        label="📥 Download Y9 Leader Overview (Excel)",
+                        data=_ldr_out,
+                        file_name="Y9_Leader_Overview.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
 
 # =========================================================================================
 # ========================= PAGE 3: Y9 JOURNEY GROUPS ====================================
@@ -2269,6 +2431,18 @@ elif page == "🏔️ Y9 Journey Groups":
                         friend_must_pairs=_friend_must_pairs,
                     )
 
+                if _asgn is None:
+                    _stud_list = list(_wdf['Official Name'])
+                    _active_keys = list(_config.keys())
+                    _asgn = ({s: _active_keys[i % len(_active_keys)]
+                              for i, s in enumerate(_stud_list)}
+                             if _active_keys else {})
+                    st.warning(
+                        f"⚠️ Week {_wk}: The optimiser couldn't satisfy capacity constraints "
+                        f"(too many students for available camp slots). Fell back to a balanced "
+                        f"distribution — manual adjustment in Excel is likely needed."
+                    )
+
                 _week_groups = {}
                 for _ck, _ni in _config.items():
                     _camp_list = sorted([s for s, c in _asgn.items() if c == _ck])
@@ -2691,76 +2865,84 @@ elif page == "🏔️ Y9 Journey Groups":
                                     elif 4 <= _num <= 6: _sc_cell.fill = fill_skill_org; _sc_cell.font = font_bold
                                     elif _num >= 7:      _sc_cell.fill = fill_skill_grn
 
-                # ── Build the Overview data (snapshot of current assignments) ────────────────
-                _ov_rows = []
+                # ── Build Overview grid data (camp columns per week, no pref scores) ─────────
+                _ov_data = {}
                 for _nm in sorted(full_lookup.keys()):
                     _ow, _oc, _osg = full_lookup[_nm]
-                    _stud_df = df_y9_act[df_y9_act['Official Name'] == _nm]
-                    _ov_house = '—'
-                    if not _stud_df.empty:
-                        _hv = _stud_df.iloc[0].get('House', '')
-                        if pd.notna(_hv) and str(_hv).strip() not in ('', 'nan', 'None'):
-                            _ov_house = str(_hv).title()
-                    _ov_prefs  = _y9_pref_lk.get(_nm, {})
-                    _ov_rank   = _ov_prefs.get(_oc, '—')
-                    _has_b_ov  = len(all_week_results.get(_ow, {}).get(_oc, {}).get('B', [])) > 0
-                    _ov_rows.append({
-                        'Week':    _ow,
-                        'Student': _nm,
-                        'House':   _ov_house,
-                        'Camp':    Y9_CAMP_DEFS.get(_oc, {}).get('label', _oc),
-                        'Group':   _osg if _has_b_ov else '—',
-                        'Rank':    _ov_rank,
-                        'MTB':     _ov_prefs.get('MTB', '—'),
-                        'CC':      _ov_prefs.get('CC', '—'),
-                        'MM':      _ov_prefs.get('MM', '—'),
-                        'Exp':     _ov_prefs.get('Explorer', '—'),
-                        'Chal':    _ov_prefs.get('Challenger', '—'),
-                    })
-                _ov_rows.sort(key=lambda r: (r['Week'], r['Camp'], r['Student']))
-                _df_overview = pd.DataFrame(_ov_rows) if _ov_rows else pd.DataFrame()
+                    _ov_data.setdefault(_ow, {}).setdefault(_oc, {'A': [], 'B': []})
+                    _ov_data[_ow][_oc][_osg].append(_nm)
+                for _wd in _ov_data.values():
+                    for _cd in _wd.values():
+                        _cd['A'].sort(); _cd['B'].sort()
+
+                _WEEK_LABELS_OV = {
+                    1: 'Week 1: Unwin & Hodgkin (12–18 November)',
+                    2: 'Week 2: Mather & Ransome (23–29 November)',
+                }
+                _CAMP_COLORS_OV = {
+                    'MTB':        'FF2E7D32', 'CC':         'FF1565C0',
+                    'MM':         'FF6A1B9A', 'Explorer':   'FFE65100',
+                    'Challenger': 'FFB71C1C',
+                }
+                _WEEK_BG_OV = {1: 'FF1A3A6B', 2: 'FF7B3F00'}
 
                 _y9_out = io.BytesIO()
                 with pd.ExcelWriter(_y9_out, engine='openpyxl') as _writer:
 
-                    # ── Sheet 0: Overview (first / active sheet) ──────────────────────────
-                    if not _df_overview.empty:
-                        _df_overview.to_excel(_writer, sheet_name='Overview', index=False)
-                        _ws_ov = _writer.sheets['Overview']
-                        from openpyxl.styles import PatternFill as _PF, Font as _Font, Alignment as _Align
-                        _fill_hdr_ov  = _PF("solid", fgColor="4472C4")
-                        _fill_w1_ov   = _PF("solid", fgColor="DDEEFF")
-                        _fill_w2_ov   = _PF("solid", fgColor="FFE8CC")
-                        _fill_p1_ov   = _PF("solid", fgColor="C8F7C5")
-                        _fill_p2_ov   = _PF("solid", fgColor="E8F8C5")
-                        _fill_p3_ov   = _PF("solid", fgColor="FFF3CD")
-                        _fill_p4_ov   = _PF("solid", fgColor="FFD9A0")
-                        _fill_p5_ov   = _PF("solid", fgColor="FFB3B3")
-                        _font_hdr_ov  = _Font(bold=True, color="FFFFFF")
-                        _font_bold_ov = _Font(bold=True)
-                        _ov_cols = list(_df_overview.columns)
-                        _pref_col_names_ov = ['Rank', 'MTB', 'CC', 'MM', 'Exp', 'Chal']
-                        _pref_fills_ov = {1: _fill_p1_ov, 2: _fill_p2_ov, 3: _fill_p3_ov,
-                                          4: _fill_p4_ov, 5: _fill_p5_ov}
-                        for ci in range(1, len(_ov_cols) + 1):
-                            _c = _ws_ov.cell(row=1, column=ci)
-                            _c.fill = _fill_hdr_ov; _c.font = _font_hdr_ov
-                        for xl_r, (_, ov_row) in enumerate(_df_overview.iterrows(), start=2):
-                            _wk_fill = _fill_w1_ov if ov_row['Week'] == 1 else _fill_w2_ov
-                            for ci in range(1, len(_ov_cols) + 1):
-                                _ws_ov.cell(row=xl_r, column=ci).fill = _wk_fill
-                            for _pcn in _pref_col_names_ov:
-                                if _pcn not in _ov_cols: continue
-                                try:
-                                    _pr_v = int(ov_row[_pcn])
-                                    _pr_c = _ws_ov.cell(row=xl_r, column=_ov_cols.index(_pcn) + 1)
-                                    _pr_c.fill = _pref_fills_ov[_pr_v]
-                                    if _pr_v in (1, 5): _pr_c.font = _font_bold_ov
-                                except (ValueError, TypeError, KeyError):
-                                    pass
-                        for _col in _ws_ov.columns:
-                            _ws_ov.column_dimensions[_col[0].column_letter].width = min(
-                                max((len(str(c.value or '')) for c in _col), default=6) + 2, 40)
+                    # ── Sheet 0: Overview grid (camp columns per week, locked) ─────────────
+                    if _ov_data:
+                        _ws_ov = _writer.book.create_sheet('Overview', 0)
+                        _fn_wk  = Font(bold=True, color="FFFFFF", size=12)
+                        _fn_ch  = Font(bold=True, color="FFFFFF", size=10)
+                        _fn_nm  = Font(size=10)
+                        _al_ctr = Alignment(horizontal="center", vertical="center")
+                        _al_lft = Alignment(horizontal="left",   vertical="center")
+                        _bd_ov  = Border(left=Side(style='thin'), right=Side(style='thin'),
+                                         top=Side(style='thin'),  bottom=Side(style='thin'))
+                        _ov_cur_row = 1
+                        for _wk_n in sorted(_ov_data.keys()):
+                            _wk_camps    = _ov_data[_wk_n]
+                            _wk_lbl      = _WEEK_LABELS_OV.get(_wk_n, f'Week {_wk_n}')
+                            _ov_col_defs = []
+                            for _ck in [k for k in Y9_CAMP_DEFS if k in _wk_camps]:
+                                _has_b_ov2 = len(_wk_camps[_ck].get('B', [])) > 0
+                                if _has_b_ov2:
+                                    _ov_col_defs.append((_ck, 'A', Y9_CAMP_DEFS[_ck]['label'] + ' — Group A'))
+                                    _ov_col_defs.append((_ck, 'B', Y9_CAMP_DEFS[_ck]['label'] + ' — Group B'))
+                                else:
+                                    _ov_col_defs.append((_ck, 'A', Y9_CAMP_DEFS[_ck]['label']))
+                            if not _ov_col_defs:
+                                continue
+                            _nc = len(_ov_col_defs)
+                            # Week header row (merged across all camp columns)
+                            if _nc > 1:
+                                _ws_ov.merge_cells(start_row=_ov_cur_row, start_column=1,
+                                                   end_row=_ov_cur_row, end_column=_nc)
+                            _wc = _ws_ov.cell(row=_ov_cur_row, column=1, value=_wk_lbl)
+                            _wc.font      = _fn_wk
+                            _wc.fill      = PatternFill("solid", fgColor=_WEEK_BG_OV.get(_wk_n, 'FF333333'))
+                            _wc.alignment = _al_ctr
+                            _ov_cur_row  += 1
+                            # Camp column headers
+                            for _ci_ov, (_ck_h, _sg_h, _lbl_h) in enumerate(_ov_col_defs, 1):
+                                _ch = _ws_ov.cell(row=_ov_cur_row, column=_ci_ov, value=_lbl_h)
+                                _ch.font      = _fn_ch
+                                _ch.fill      = PatternFill("solid", fgColor=_CAMP_COLORS_OV.get(_ck_h, 'FF555555'))
+                                _ch.alignment = _al_ctr
+                                _ch.border    = _bd_ov
+                                _ws_ov.column_dimensions[get_column_letter(_ci_ov)].width = 26
+                            _ov_cur_row += 1
+                            # Student rows
+                            _col_lists_ov = [_ov_data[_wk_n][_ck].get(_sg, []) for _ck, _sg, _ in _ov_col_defs]
+                            _max_r_ov = max((len(l) for l in _col_lists_ov), default=0)
+                            for _r_ov in range(_max_r_ov):
+                                for _ci_ov, _lst_ov in enumerate(_col_lists_ov, 1):
+                                    _v = _lst_ov[_r_ov] if _r_ov < len(_lst_ov) else ""
+                                    _sc = _ws_ov.cell(row=_ov_cur_row + _r_ov, column=_ci_ov, value=_v)
+                                    _sc.font      = _fn_nm
+                                    _sc.alignment = _al_lft
+                                    _sc.border    = _bd_ov
+                            _ov_cur_row += _max_r_ov + 2   # gap between weeks
                         _ws_ov.protection.sheet = True
 
                     # ── Ordered sheets: by camp type, then week, then subgroup
