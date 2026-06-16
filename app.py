@@ -1579,6 +1579,7 @@ elif page == "🏔️ Y9 Journey Groups":
     # ── Session State ─────────────────────────────────────────────────────────────────────
     for _k, _v in [('y9_sep', []), ('y9_must', []), ('y9_force', {}),
                    ('y9_force_week', {}),
+                   ('y9_camp_pins', {}),   # {week_num: {camp_key: n_instances}} — staff overrides
                    ('y9_na', []), ('y9_seed', 0), ('y9_results', {}), ('y9_states', {}),
                    ('y9_include_drafts', False), ('y9_generated', False)]:
         if _k not in st.session_state:
@@ -1737,6 +1738,9 @@ elif page == "🏔️ Y9 Journey Groups":
                     st.session_state.y9_must       = [tuple(x) for x in _loaded.get('must',  [])]
                     st.session_state.y9_force      = _loaded.get('force', {})
                     st.session_state.y9_force_week = _loaded.get('force_week', {})
+                    # Camp pins — stored as {str(week): {camp_key: n}} in JSON; convert keys to int
+                    _raw_pins = _loaded.get('camp_pins', {})
+                    st.session_state.y9_camp_pins  = {int(k): v for k, v in _raw_pins.items()}
                     if 'weights' in _loaded:
                         st.session_state.y9_weights.update(_loaded['weights'])
                     st.session_state.y9_include_drafts = _loaded.get('include_drafts', False)
@@ -1826,6 +1830,68 @@ elif page == "🏔️ Y9 Journey Groups":
             if st.sidebar.button("Clear Force Week Rules", key="y9_clr_fwk"):
                 st.session_state.y9_force_week = {}; st.rerun()
 
+        # ── Camp Configuration Pins ───────────────────────────────────────────────────────
+        st.sidebar.header("📌 Y9: Pin Camp Counts")
+        st.sidebar.caption(
+            "Override the AI's automatic camp selection. "
+            "Pin how many instances of each camp run per week. "
+            "Unpinned camps are still chosen automatically."
+        )
+        _PIN_CAMP_OPTIONS = {
+            'MTB':        ('Mountain to Sea MTB',                       1, 1),  # (label, min, max)
+            'CC':         ('Colossal Cliffs',                           1, 2),
+            'MM':         ('Mersey & Mountains',                        1, 2),
+            'Explorer':   ('Cradle to Coast Explorer',                  0, 2),
+            'Challenger': ('Cradle to Coast Challenger',                0, 2),
+        }
+        _PIN_NOTES = {
+            'Explorer':   "Set to 0 to exclude; 2 for two Explorer groups instead of one",
+            'Challenger': "Set to 0 to exclude; 2 for two Challenger groups instead of one",
+            'MTB':        "Fixed at 1 — only one MTB group runs per week",
+        }
+        for _pin_wk in [1, 2]:
+            _pin_wk_label = "Week 1 (Unwin & Hodgkin)" if _pin_wk == 1 else "Week 2 (Mather & Ransome)"
+            with st.sidebar.expander(f"📅 {_pin_wk_label}", expanded=False):
+                _wk_pins = st.session_state.y9_camp_pins.get(_pin_wk, {})
+                _any_pinned = bool(_wk_pins)
+                if _any_pinned:
+                    st.caption(f"⚡ {len(_wk_pins)} camp(s) pinned for this week")
+                for _pk, (_plabel, _pmin, _pmax) in _PIN_CAMP_OPTIONS.items():
+                    _cur_pin = _wk_pins.get(_pk)
+                    _pin_widget_key = f"y9_pin_{_pin_wk}_{_pk}"
+                    _note = _PIN_NOTES.get(_pk, "")
+                    _col_l, _col_r = st.columns([3, 2])
+                    with _col_l:
+                        st.markdown(f"**{_plabel}**")
+                        if _note:
+                            st.caption(_note)
+                    with _col_r:
+                        _options = ["Auto"] + [str(i) for i in range(_pmin, _pmax + 1)]
+                        _default_idx = 0 if _cur_pin is None else (
+                            _options.index(str(_cur_pin)) if str(_cur_pin) in _options else 0)
+                        _sel = st.selectbox(
+                            f"Instances ({_plabel})",
+                            _options,
+                            index=_default_idx,
+                            key=_pin_widget_key,
+                            label_visibility="collapsed"
+                        )
+                        _new_pin = None if _sel == "Auto" else int(_sel)
+                        if _new_pin != _cur_pin:
+                            if _new_pin is None:
+                                _wk_pins.pop(_pk, None)
+                            else:
+                                _wk_pins[_pk] = _new_pin
+                            if _wk_pins:
+                                st.session_state.y9_camp_pins[_pin_wk] = _wk_pins
+                            else:
+                                st.session_state.y9_camp_pins.pop(_pin_wk, None)
+                            st.rerun()
+                if _any_pinned:
+                    if st.button(f"🗑️ Clear all pins — Week {_pin_wk}", key=f"y9_clr_pins_{_pin_wk}"):
+                        st.session_state.y9_camp_pins.pop(_pin_wk, None)
+                        st.rerun()
+
         # Must go with
         st.sidebar.header("🤝 Y9: Must Go With")
         _cm1, _cm2 = st.sidebar.columns(2)
@@ -1902,6 +1968,7 @@ elif page == "🏔️ Y9 Journey Groups":
             'must':       [list(p) for p in st.session_state.y9_must],
             'force':      st.session_state.y9_force,
             'force_week': st.session_state.y9_force_week,
+            'camp_pins':  {str(k): v for k, v in st.session_state.y9_camp_pins.items()},
             'na':         st.session_state.y9_na,
             'na_details': _na_details,
             'include_drafts': st.session_state.y9_include_drafts,
@@ -1996,7 +2063,7 @@ elif page == "🏔️ Y9 Journey Groups":
 
         # ── ALGORITHM HELPERS ─────────────────────────────────────────────────────────────
 
-        def _determine_config(n_students, pref_data_dict, week_num):
+        def _determine_config(n_students, pref_data_dict, week_num, camp_pins=None):
             """Return {camp_key: n_instances} obeying per-week camp count limits.
 
             Rules (same for both weeks unless noted):
@@ -2006,44 +2073,87 @@ elif page == "🏔️ Y9 Journey Groups":
               • Cradle (Explorer + Challenger combined): exactly 2 instances total
                   — could be 2×Explorer, 2×Challenger, or 1 of each
               • Week 1 total: ≤ 7 camps   Week 2 total: ≤ 6 camps
+
+            camp_pins: optional {camp_key: n_instances} staff overrides — pinned camps
+            bypass demand-based auto-detection entirely.
             """
             MAX_CAMPS = {1: 7, 2: 6}.get(week_num, 7)
+            _pins = camp_pins or {}
 
-            # Count demand for each cradle type
+            # Count demand for each cradle type (top-2 preference = ranked 1 or 2)
             exp_d = sum(1 for p in pref_data_dict.values() if p.get('Explorer',   5) <= 2)
             cha_d = sum(1 for p in pref_data_dict.values() if p.get('Challenger', 5) <= 2)
 
-            # Cradle split: always 2 instances total; split by demand
-            if exp_d >= cha_d:
+            # ── Cradle split: 2 instances total, split by demand ─────────────────────────
+            # Pinned cradle camps take priority over auto-detection.
+            _exp_pinned = 'Explorer'   in _pins
+            _cha_pinned = 'Challenger' in _pins
+            if _exp_pinned or _cha_pinned:
+                # Use pins directly; fill the other to reach 2 total if neither is excluded
+                _exp_n = _pins.get('Explorer',   0)
+                _cha_n = _pins.get('Challenger', 0)
+                # If both are pinned, honour them as-is; if only one is pinned, auto-fill the other
+                if _exp_pinned and _cha_pinned:
+                    cradle_config = {}
+                    if _exp_n > 0: cradle_config['Explorer']   = _exp_n
+                    if _cha_n > 0: cradle_config['Challenger'] = _cha_n
+                elif _exp_pinned:
+                    cradle_config = {}
+                    if _exp_n > 0: cradle_config['Explorer'] = _exp_n
+                    _remaining = 2 - _exp_n
+                    if _remaining > 0: cradle_config['Challenger'] = _remaining
+                else:  # only Challenger pinned
+                    cradle_config = {}
+                    if _cha_n > 0: cradle_config['Challenger'] = _cha_n
+                    _remaining = 2 - _cha_n
+                    if _remaining > 0: cradle_config['Explorer'] = _remaining
+            else:
+                # Auto: switch to 2× Explorer when Explorer demand is more than double
+                # Challenger demand (and there is meaningful Explorer interest).
+                # This avoids producing a Challenger group that only one or two
+                # students actually ranked highly.
                 if exp_d == 0 and cha_d == 0:
-                    cradle_config = {'Explorer': 1, 'Challenger': 1}   # no preference data — split evenly
+                    cradle_config = {'Explorer': 1, 'Challenger': 1}   # no data — split evenly
                 elif cha_d == 0:
                     cradle_config = {'Explorer': 2}
-                else:
-                    cradle_config = {'Explorer': 1, 'Challenger': 1}
-            else:
-                if exp_d == 0:
+                elif exp_d == 0:
+                    cradle_config = {'Challenger': 2}
+                elif exp_d >= cha_d * 2:
+                    # Explorer demand is more than double Challenger — run 2× Explorer
+                    cradle_config = {'Explorer': 2}
+                elif cha_d >= exp_d * 2:
+                    # Challenger demand is more than double Explorer — run 2× Challenger
                     cradle_config = {'Challenger': 2}
                 else:
                     cradle_config = {'Explorer': 1, 'Challenger': 1}
 
             # Start with the fixed minimum: MTB×1, CC×1, MM×1, plus cradle
             config = {'MTB': 1, 'CC': 1, 'MM': 1, **cradle_config}
+            # Apply any pins for MTB / CC / MM (overwrite auto values)
+            for _ck in ('MTB', 'CC', 'MM'):
+                if _ck in _pins:
+                    if _pins[_ck] > 0:
+                        config[_ck] = _pins[_ck]
+                    else:
+                        config.pop(_ck, None)
             total = sum(config.values())   # 4 or 5 depending on cradle split
 
             # Count demand for CC and MM to decide whether to run a second instance
             cc_d = sum(1 for p in pref_data_dict.values() if p.get('CC', 5) <= 2)
             mm_d = sum(1 for p in pref_data_dict.values() if p.get('MM', 5) <= 2)
 
-            # Add a second MM first (if demand warrants and we have room)
-            if total < MAX_CAMPS and mm_d >= cc_d:
-                config['MM'] = 2; total += 1
-            # Add a second CC (if room)
-            if total < MAX_CAMPS:
-                config['CC'] = 2; total += 1
+            # Add a second MM first (if demand warrants and we have room, and not already pinned)
+            if 'MM' not in _pins:
+                if total < MAX_CAMPS and mm_d >= cc_d:
+                    config['MM'] = 2; total += 1
+            # Add a second CC (if room and not pinned)
+            if 'CC' not in _pins:
+                if total < MAX_CAMPS:
+                    config['CC'] = 2; total += 1
             # If MM wasn't doubled yet, try again
-            if total < MAX_CAMPS and config.get('MM', 1) == 1:
-                config['MM'] = 2; total += 1
+            if 'MM' not in _pins:
+                if total < MAX_CAMPS and config.get('MM', 1) == 1:
+                    config['MM'] = 2; total += 1
 
             return config
 
@@ -2394,7 +2504,8 @@ elif page == "🏔️ Y9 Journey Groups":
                         _friend_must_pairs.append((_st, _f))
 
             all_friend_reqs.update(_wfr)
-            _config = _determine_config(len(_wdf), _pref_dict, _wk)
+            _wk_pins = st.session_state.y9_camp_pins.get(_wk, {})
+            _config = _determine_config(len(_wdf), _pref_dict, _wk, camp_pins=_wk_pins)
             _caps   = _get_caps(_config)
             all_week_configs[_wk] = _config
 
@@ -2406,6 +2517,7 @@ elif page == "🏔️ Y9 Journey Groups":
                 'config': _config, 'na': sorted(_y9_na),
                 'force': sorted(_forced_wk.items()),
                 'force_week': sorted(_force_week_rules.items()),
+                'camp_pins': sorted(_wk_pins.items()),
                 'sep':   sorted([tuple(sorted(p)) for p in _sep_wk]),
                 'must':  sorted([tuple(sorted(p)) for p in _must_wk]),
                 'seed': st.session_state.y9_seed, 'depth': y9_depth, 'n': len(_wdf),
@@ -3149,12 +3261,22 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
             "3. Refresh this page."
         )
 
+    # Camp options available for force-camp assignment in the Free Text Analyser
+    _FT_CAMP_OPTIONS = {
+        'MTB':        'Mountain to Sea MTB',
+        'CC':         'Colossal Cliffs',
+        'MM':         'Mersey & Mountains',
+        'Explorer':   'Cradle to Coast Explorer',
+        'Challenger': 'Cradle to Coast Challenger',
+    }
+
     # ── Session state init ─────────────────────────────────────────────────────────────────
     for _ftk, _ftv in [
         ("y9_ft_results",         []),
         ("y9_ft_analysed",        False),
         ("y9_ft_new_must",        []),
         ("y9_ft_new_force_week",  {}),
+        ("y9_ft_new_force_camp",  {}),   # student_name -> camp_key
         ("y9_ft_noted_list",      []),   # list of (email, category) tuples — kept for compat
         ("y9_ft_friend_dec",      {}),   # (email, raw_nm) -> {action, resolved}
         ("y9_ft_perm_dec",        {}),   # (email, 'perm') -> {type, ...}
@@ -3404,7 +3526,7 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         for _rk in ["y9_ft_results", "y9_ft_new_must", "y9_ft_noted_list"]:
             st.session_state[_rk] = []
         for _rk in ["y9_ft_new_force_week", "y9_ft_friend_dec", "y9_ft_perm_dec",
-                    "y9_ft_staff_ticks", "y9_ft_manual_add"]:
+                    "y9_ft_staff_ticks", "y9_ft_manual_add", "y9_ft_new_force_camp"]:
             st.session_state[_rk] = {}
         st.session_state.y9_ft_analysed = False
         st.rerun()
@@ -3792,14 +3914,19 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                             st.rerun()
 
                 elif _man_type == "force_camp":
-                    _man_camp = st.text_input(
-                        "Camp name / identifier:", placeholder="e.g. Dougie's camp",
+                    _man_camp = st.selectbox(
+                        "Assign to camp:",
+                        ["— select —"] + list(_FT_CAMP_OPTIONS.keys()),
+                        format_func=lambda k: _FT_CAMP_OPTIONS[k] if k != "— select —" else "— choose a camp —",
                         key=_man_camp_key, label_visibility="collapsed"
                     )
                     if st.button("➕ Add Forced Camp", key=f"y9_ft_man_add_{_fi}_camp", use_container_width=True):
-                        if _man_camp and _man_camp.strip():
-                            _detail = f"{_fres['name']} → {_man_camp.strip()}"
-                            _man_entries.append({"type": "force_camp", "detail": _detail})
+                        if _man_camp and _man_camp != "— select —":
+                            _camp_label = _FT_CAMP_OPTIONS[_man_camp]
+                            # Store the camp key so it flows correctly into the JSON export
+                            st.session_state.y9_ft_new_force_camp[_fres["name"]] = _man_camp
+                            _detail = f"{_fres['name']} → {_camp_label}"
+                            _man_entries.append({"type": "force_camp", "detail": _detail, "camp_key": _man_camp})
                             st.session_state.y9_ft_manual_add[_man_email] = _man_entries
                             st.rerun()
 
@@ -3865,9 +3992,14 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
         for _fw_nm, _fw_wk in st.session_state.y9_ft_new_force_week.items():
             _ft_base["force_week"][_fw_nm] = _fw_wk
 
+        # Merge new force-camp assignments
+        for _fc_nm, _fc_key in st.session_state.y9_ft_new_force_camp.items():
+            _ft_base["force"][_fc_nm] = _fc_key
+
         # Count new rules added this session
         _n_new_must  = len(st.session_state.y9_ft_new_must)
         _n_new_fwk   = len(st.session_state.y9_ft_new_force_week)
+        _n_new_fcamp = len(st.session_state.y9_ft_new_force_camp)
         _n_base_must = len(_ft_existing_rules.get('must', []))
         _n_base_fwk  = len(_ft_existing_rules.get('force_week', {}))
 
@@ -3900,12 +4032,12 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
             "Force-Week rules", len(_ft_base['force_week']),
             delta=f"+{_n_new_fwk} new" if _n_new_fwk else None)
         _rules_status_cols[3].metric(
-            "Total rules in export",
-            len(_ft_base['must']) + len(_ft_base['force_week']) + len(_ft_base.get('sep', []))
-        )
+            "Force-Camp rules", len(_ft_base['force']),
+            delta=f"+{_n_new_fcamp} new" if _n_new_fcamp else None)
 
-        if _n_new_must or _n_new_fwk:
-            with st.expander(f"✏️ Preview {_n_new_must + _n_new_fwk} new rule(s) added this session"):
+        if _n_new_must or _n_new_fwk or _n_new_fcamp:
+            _n_new_total = _n_new_must + _n_new_fwk + _n_new_fcamp
+            with st.expander(f"✏️ Preview {_n_new_total} new rule(s) added this session"):
                 if st.session_state.y9_ft_new_must:
                     st.write("**New Must-Go pairs:**")
                     for _ma, _mb in st.session_state.y9_ft_new_must:
@@ -3914,6 +4046,10 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
                     st.write("**New Force-Week overrides:**")
                     for _fn, _fw in st.session_state.y9_ft_new_force_week.items():
                         st.write(f"  • {_fn} → Week {_fw}")
+                if st.session_state.y9_ft_new_force_camp:
+                    st.write("**New Force-Camp assignments:**")
+                    for _fn, _fck in st.session_state.y9_ft_new_force_camp.items():
+                        st.write(f"  • {_fn} → {_FT_CAMP_OPTIONS.get(_fck, _fck)}")
 
         st.markdown("---")
         _exp_c1, _exp_c2 = st.columns(2)
