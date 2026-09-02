@@ -26,6 +26,8 @@ fi
 echo ""
 echo "Step 2/3: Downloading app files from GitHub..."
 curl -s -L -o app.py           "$RAW_BASE/app.py"
+curl -s -L -o camp_sync.py     "$RAW_BASE/camp_sync.py"
+curl -s -L -o kanban_ui.py     "$RAW_BASE/kanban_ui.py"
 curl -s -L -o requirements.txt "$RAW_BASE/requirements.txt"
 curl -s -L -o app_icon.png     "$RAW_BASE/app_icon.png"
 
@@ -36,6 +38,8 @@ curl -s -L -o launcher.sh "$RAW_BASE/launcher.sh"
 chmod +x launcher.sh
 
 echo "  app.py              ($(wc -c < app.py | tr -d ' ') bytes)"
+echo "  camp_sync.py        ($(wc -c < camp_sync.py | tr -d ' ') bytes)"
+echo "  kanban_ui.py        ($(wc -c < kanban_ui.py | tr -d ' ') bytes)"
 echo "  requirements.txt"
 echo "  app_icon.png"
 echo "  launcher.sh"

@@ -81,6 +81,8 @@ if [ $LAUNCHER_UPDATED -eq 0 ]; then
 fi
 
 fetch_and_report "$RAW_BASE/app.py"           "app.py"           "app.py          "
+fetch_and_report "$RAW_BASE/camp_sync.py"     "camp_sync.py"     "camp_sync.py    "
+fetch_and_report "$RAW_BASE/kanban_ui.py"     "kanban_ui.py"     "kanban_ui.py    "
 fetch_and_report "$RAW_BASE/requirements.txt" "requirements.txt" "requirements.txt"
 fetch_and_report "$RAW_BASE/app_icon.png"     "app_icon.png"     "app_icon.png    "
 

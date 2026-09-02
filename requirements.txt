@@ -4,3 +4,4 @@ networkx
 openpyxl
 pyobjc-framework-Cocoa
 rapidfuzz
+streamlit-sortables

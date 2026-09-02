@@ -9,6 +9,9 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+import camp_sync
+from kanban_ui import render_kanban_board, render_student_details_panel, render_group_management
+
 st.set_page_config(page_title="Camp Group Creator", layout="wide")
 st.sidebar.title("🏕️ Camp Group Creator")
 
@@ -22,7 +25,7 @@ students_file  = st.sidebar.file_uploader("Student List (CSV)",      type=["csv"
 # ── Tool selection comes FIRST so Y8 processing can be gated by page ─────────
 st.sidebar.markdown("---")
 st.sidebar.header("🎯 2. Select Tool")
-page = st.sidebar.radio("Select tool", ["🏕️ Y8 Group Creator", "🏔️ Y9 Journey Groups", "📋 Final Roster & Leader Builder", "🔍 Y9 Free Text Analyser"], label_visibility="collapsed")
+page = st.sidebar.radio("Select tool", ["🏕️ Y8 Group Creator", "🏔️ Y9 Journey Groups", "📋 Final Roster & Leader Builder", "🔍 Y9 Free Text Analyser", "🗂️ Manual Group Alignment"], label_visibility="collapsed")
 
 # ── Y8 global data processing (only when a Y8 tool is active) ────────────────
 df_merged_full = None
@@ -30,7 +33,7 @@ df_stud_pub = None
 mtb_ability_col = None
 all_students_list = []
 
-if responses_file and students_file and page in ["🏕️ Y8 Group Creator", "📋 Final Roster & Leader Builder"]:
+if responses_file and students_file and page in ["🏕️ Y8 Group Creator", "📋 Final Roster & Leader Builder", "🗂️ Manual Group Alignment"]:
     responses_file.seek(0)
     students_file.seek(0)
     df_resp = pd.read_csv(responses_file)
@@ -4282,3 +4285,168 @@ Return ONLY the JSON object. No explanation. No markdown. No other text."""
             "Click **🔬 Analyse Free-Text Responses** above to run the AI over the survey. "
             "All processing happens on-device via Ollama — no data leaves your Mac."
         )
+
+# =========================================================================================
+# ========================= PAGE 5: MANUAL GROUP ALIGNMENT ================================
+# =========================================================================================
+elif page == "🗂️ Manual Group Alignment":
+    st.title("🗂️ Manual Group Alignment")
+    st.caption("Drag students between camp groups. Changes are shared with other staff via Google Drive.")
+
+    # ── 1. Locate the shared state file ──────────────────────────────────────
+    if "camp_state_path" not in st.session_state:
+        st.session_state.camp_state_path = camp_sync.resolve_state_file_path()
+
+    if st.session_state.camp_state_path is None:
+        st.warning(
+            "Couldn't automatically find the shared **App Data** folder in your Google Drive. "
+            "This can happen if 'Outdoor Education Master Folder' hasn't finished syncing yet, "
+            "or isn't added to your Drive."
+        )
+        manual_path = st.text_input(
+            "Paste the full folder path that contains (or should contain) camp_state.json:",
+            placeholder="/Users/yourname/Library/CloudStorage/GoogleDrive-you@school.edu/.../App Data",
+        )
+        if st.button("Use this folder"):
+            resolved = camp_sync.resolve_state_file_path(chosen_path=manual_path.strip())
+            if resolved:
+                st.session_state.camp_state_path = resolved
+                st.rerun()
+            else:
+                st.error("That folder doesn't look valid. Double-check the path and try again.")
+        st.stop()
+
+    state_path = st.session_state.camp_state_path
+    st.caption(f"📁 Shared file: `{state_path}`")
+
+    # ── 2. Load state (once per session, or after an explicit sync) ─────────
+    if "camp_state" not in st.session_state:
+        try:
+            st.session_state.camp_state = camp_sync.load_state(state_path)
+        except Exception as e:
+            st.error(f"Failed to load shared state: {e}")
+            st.stop()
+
+    camp_state = st.session_state.camp_state
+
+    # ── 3. Top bar: sync / save / status ─────────────────────────────────────
+    top_col1, top_col2, top_col3 = st.columns([1, 1, 3])
+    with top_col1:
+        if st.button("🔄 Sync Latest Changes", use_container_width=True):
+            try:
+                st.session_state.camp_state = camp_sync.sync_latest(state_path)
+                st.success("Synced with the latest shared version.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Sync failed: {e}")
+    with top_col2:
+        save_clicked = st.button("💾 Save Changes", type="primary", use_container_width=True)
+    with top_col3:
+        last_by = camp_state.get("last_modified_by", "unknown")
+        last_at = camp_state.get("last_modified", "unknown")
+        st.caption(f"Last saved by **{last_by}** at {last_at}")
+
+    st.markdown("---")
+
+    # ── 4. Import students from the uploaded CSVs (optional, additive) ──────
+    with st.expander("📥 Import Students from Uploaded CSVs", expanded=False):
+        if df_stud_pub is None or df_merged_full is None:
+            st.caption("Upload the Preference Survey and Student List CSVs in the sidebar to enable import.")
+        else:
+            st.caption(
+                "Adds any students not already in the shared file. "
+                "Existing students and their current group assignments are left untouched."
+            )
+            if st.button("Import new students now"):
+                friend_cols = [c for c in df_merged_full.columns if 'classmate' in c.lower()]
+                added = 0
+                for _, row in df_stud_pub.iterrows():
+                    sid = str(row.get('Student ID', '')).strip()
+                    name = str(row.get('Official Name', '')).strip()
+                    if not sid or sid == 'N/A' or not name:
+                        continue
+                    if sid in camp_state["students"]:
+                        continue  # don't overwrite existing manual edits
+
+                    friend_requests = []
+                    match = df_merged_full[df_merged_full['Official Name'] == name]
+                    if not match.empty and friend_cols:
+                        for col in friend_cols:
+                            val = match.iloc[0].get(col)
+                            if pd.notna(val) and isinstance(val, str) and val.strip():
+                                friend_requests.append(val.strip())
+
+                    form_data = {}
+                    if not match.empty:
+                        row0 = match.iloc[0]
+                        for col in ['Rollgroup', 'Gender']:
+                            if col in row0 and pd.notna(row0[col]):
+                                form_data[col] = row0[col]
+
+                    camp_state["students"][sid] = {
+                        "name": name,
+                        "friend_requests": friend_requests,
+                        "form_data": form_data,
+                        "medical_flags": [],
+                    }
+                    if "Unassigned" not in camp_state["groups"]:
+                        camp_state["groups"]["Unassigned"] = []
+                    camp_state["groups"]["Unassigned"].append(sid)
+                    added += 1
+
+                st.session_state.camp_state = camp_state
+                st.success(f"Imported {added} new student(s) into 'Unassigned'. Click Save Changes to share them.")
+                st.rerun()
+
+    # ── 5. Manage groups (add/remove columns) ────────────────────────────────
+    camp_state["groups"] = render_group_management(camp_state["groups"])
+
+    # ── 6. Drag-and-drop board ────────────────────────────────────────────────
+    st.markdown("#### Drag students between groups")
+    updated_groups = render_kanban_board(camp_state["groups"], camp_state["students"])
+    camp_state["groups"] = updated_groups
+    st.session_state.camp_state = camp_state
+
+    st.markdown("---")
+
+    # ── 7. Student details (info popovers) ───────────────────────────────────
+    render_student_details_panel(camp_state["students"], camp_state["groups"])
+
+    st.markdown("---")
+
+    # ── 8. Manual medical-flag / notes editing ───────────────────────────────
+    with st.expander("✏️ Edit Student Medical Flags", expanded=False):
+        st.caption("Comma-separate multiple flags, e.g. 'Asthma - carries inhaler, Nut allergy (EpiPen)'")
+        all_ids = sorted(camp_state["students"].keys(), key=lambda sid: camp_state["students"][sid].get("name", sid))
+        if all_ids:
+            selected_sid = st.selectbox(
+                "Student",
+                options=all_ids,
+                format_func=lambda sid: camp_state["students"][sid].get("name", sid),
+            )
+            existing_flags = ", ".join(camp_state["students"][selected_sid].get("medical_flags", []))
+            new_flags_raw = st.text_area("Medical flags", value=existing_flags)
+            if st.button("Apply Flags"):
+                parsed = [f.strip() for f in new_flags_raw.split(",") if f.strip()]
+                camp_state["students"][selected_sid]["medical_flags"] = parsed
+                st.session_state.camp_state = camp_state
+                st.success(f"Updated flags for {camp_state['students'][selected_sid].get('name', selected_sid)}. Click Save Changes to share.")
+        else:
+            st.caption("No students yet — import some above first.")
+
+    # ── 9. Handle Save (with optimistic-lock concurrency check) ─────────────
+    if save_clicked:
+        try:
+            saved_state = camp_sync.save_state(
+                state_path,
+                camp_state,
+                loaded_version=camp_state["_loaded_version"],
+                loaded_mtime=camp_state["_loaded_mtime"],
+            )
+            st.session_state.camp_state = saved_state
+            st.success("Saved! Other staff will see these changes once Google Drive syncs (usually a few seconds).")
+            st.rerun()
+        except camp_sync.ConcurrencyError as e:
+            st.error(f"⚠️ Save blocked: {e}")
+        except Exception as e:
+            st.error(f"Save failed: {e}")
