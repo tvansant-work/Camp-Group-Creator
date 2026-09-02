@@ -4319,22 +4319,76 @@ elif page == "🗂️ Manual Group Alignment":
     state_path = st.session_state.camp_state_path
     st.caption(f"📁 Shared file: `{state_path}`")
 
-    # ── 2. Load state (once per session, or after an explicit sync) ─────────
+    # ── 2. Choose which camp/dataset to work on (Y8, Y9, etc.) ───────────────
+    # Multiple independent group-sets live in the SAME shared JSON file.
+    # Switching here only changes what THIS browser session is looking at --
+    # nothing else is touched, and other staff can be on a different camp
+    # (or the same one) at the same time without interfering with each other.
+    try:
+        camp_names = camp_sync.list_camp_names(state_path)
+    except Exception as e:
+        st.error(f"Failed to read shared file: {e}")
+        st.stop()
+
+    NEW_CAMP_OPTION = "➕ Create new camp..."
+    camp_col1, camp_col2 = st.columns([3, 2])
+    with camp_col1:
+        chosen_camp = st.selectbox(
+            "Working on:",
+            options=camp_names + [NEW_CAMP_OPTION],
+            index=camp_names.index(st.session_state.get("camp_name")) if st.session_state.get("camp_name") in camp_names else 0,
+        )
+
+    if chosen_camp == NEW_CAMP_OPTION:
+        with camp_col2:
+            new_camp_input = st.text_input("New camp name", placeholder="e.g. Y9 2026", label_visibility="visible")
+            if st.button("Create & switch to it") and new_camp_input.strip():
+                camp_sync.create_camp(state_path, new_camp_input.strip())
+                st.session_state.camp_name = new_camp_input.strip()
+                st.session_state.pop("camp_state", None)
+                st.rerun()
+        st.stop()
+
+    # Switching camps discards any UNSAVED edits in this browser session for
+    # the camp being left (the shared file itself is never touched by this).
+    if st.session_state.get("camp_name") != chosen_camp:
+        st.session_state.camp_name = chosen_camp
+        st.session_state.pop("camp_state", None)
+
+    camp_name = st.session_state.camp_name
+
+    # ── 3. Load this camp's state (once per session, or after sync/switch) ──
     if "camp_state" not in st.session_state:
         try:
-            st.session_state.camp_state = camp_sync.load_state(state_path)
+            st.session_state.camp_state = camp_sync.load_camp(state_path, camp_name)
         except Exception as e:
-            st.error(f"Failed to load shared state: {e}")
+            st.error(f"Failed to load '{camp_name}': {e}")
             st.stop()
 
     camp_state = st.session_state.camp_state
 
-    # ── 3. Top bar: sync / save / status ─────────────────────────────────────
+    # ── 4. Staleness banner ───────────────────────────────────────────────────
+    # Cheap check (no full reload) comparing what's on disk right now against
+    # what THIS session loaded, so people get a nudge before they start
+    # editing on top of outdated data.
+    try:
+        current_disk_version = camp_sync.peek_camp_version(state_path, camp_name)
+    except Exception:
+        current_disk_version = None
+
+    if current_disk_version is not None and current_disk_version != camp_state["_loaded_version"]:
+        st.warning(
+            f"⚠️ A newer version of **{camp_name}** is available on Google Drive "
+            f"(you're viewing v{camp_state['_loaded_version']}, current is v{current_disk_version}). "
+            "Sync before making changes, or your save may be blocked."
+        )
+
+    # ── 5. Top bar: sync / save / status ─────────────────────────────────────
     top_col1, top_col2, top_col3 = st.columns([1, 1, 3])
     with top_col1:
         if st.button("🔄 Sync Latest Changes", use_container_width=True):
             try:
-                st.session_state.camp_state = camp_sync.sync_latest(state_path)
+                st.session_state.camp_state = camp_sync.sync_camp(state_path, camp_name)
                 st.success("Synced with the latest shared version.")
                 st.rerun()
             except Exception as e:
@@ -4344,17 +4398,17 @@ elif page == "🗂️ Manual Group Alignment":
     with top_col3:
         last_by = camp_state.get("last_modified_by", "unknown")
         last_at = camp_state.get("last_modified", "unknown")
-        st.caption(f"Last saved by **{last_by}** at {last_at}")
+        st.caption(f"**{camp_name}** — v{camp_state['_loaded_version']} — last saved by **{last_by}** at {last_at}")
 
     st.markdown("---")
 
-    # ── 4. Import students from the uploaded CSVs (optional, additive) ──────
+    # ── 6. Import students from the uploaded CSVs (optional, additive) ──────
     with st.expander("📥 Import Students from Uploaded CSVs", expanded=False):
         if df_stud_pub is None or df_merged_full is None:
             st.caption("Upload the Preference Survey and Student List CSVs in the sidebar to enable import.")
         else:
             st.caption(
-                "Adds any students not already in the shared file. "
+                f"Adds any students not already in '{camp_name}'. "
                 "Existing students and their current group assignments are left untouched."
             )
             if st.button("Import new students now"):
@@ -4398,10 +4452,10 @@ elif page == "🗂️ Manual Group Alignment":
                 st.success(f"Imported {added} new student(s) into 'Unassigned'. Click Save Changes to share them.")
                 st.rerun()
 
-    # ── 5. Manage groups (add/remove columns) ────────────────────────────────
+    # ── 7. Manage groups (add/remove columns) ────────────────────────────────
     camp_state["groups"] = render_group_management(camp_state["groups"])
 
-    # ── 6. Drag-and-drop board ────────────────────────────────────────────────
+    # ── 8. Drag-and-drop board ────────────────────────────────────────────────
     st.markdown("#### Drag students between groups")
     updated_groups = render_kanban_board(camp_state["groups"], camp_state["students"])
     camp_state["groups"] = updated_groups
@@ -4409,12 +4463,12 @@ elif page == "🗂️ Manual Group Alignment":
 
     st.markdown("---")
 
-    # ── 7. Student details (info popovers) ───────────────────────────────────
+    # ── 9. Student details (info popovers) ───────────────────────────────────
     render_student_details_panel(camp_state["students"], camp_state["groups"])
 
     st.markdown("---")
 
-    # ── 8. Manual medical-flag / notes editing ───────────────────────────────
+    # ── 10. Manual medical-flag / notes editing ──────────────────────────────
     with st.expander("✏️ Edit Student Medical Flags", expanded=False):
         st.caption("Comma-separate multiple flags, e.g. 'Asthma - carries inhaler, Nut allergy (EpiPen)'")
         all_ids = sorted(camp_state["students"].keys(), key=lambda sid: camp_state["students"][sid].get("name", sid))
@@ -4434,11 +4488,12 @@ elif page == "🗂️ Manual Group Alignment":
         else:
             st.caption("No students yet — import some above first.")
 
-    # ── 9. Handle Save (with optimistic-lock concurrency check) ─────────────
+    # ── 11. Handle Save (with per-camp optimistic-lock concurrency check) ───
     if save_clicked:
         try:
-            saved_state = camp_sync.save_state(
+            saved_state = camp_sync.save_camp(
                 state_path,
+                camp_name,
                 camp_state,
                 loaded_version=camp_state["_loaded_version"],
                 loaded_mtime=camp_state["_loaded_mtime"],

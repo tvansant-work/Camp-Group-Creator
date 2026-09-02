@@ -2,7 +2,8 @@
 """
 Backend module for Manual Group Alignment.
 Handles: Google Drive path discovery, JSON state load/save,
-and optimistic-lock concurrency checks.
+multi-"camp" (independent group sets, e.g. Y8 2026 / Y9 2026) support,
+and per-camp optimistic-lock concurrency checks.
 """
 
 import json
@@ -17,6 +18,7 @@ STATE_FILENAME = "camp_state.json"
 APP_DATA_CHAIN = ["Outdoor Education Master Folder", "operations folder", "App Data"]
 LOCAL_CONFIG_PATH = Path.home() / "Library" / "Application Support" / \
                     "Camp_Group_Creator" / "drive_location.json"
+DEFAULT_CAMP_NAME = "Default"
 
 
 # ============================================================================
@@ -139,23 +141,42 @@ def resolve_state_file_path(chosen_path: str | None = None) -> Path | None:
     _save_local_config({"app_data_path": str(app_data)})
 
     if not state_path.exists():
-        _write_json_atomic(state_path, _default_state())
+        _write_json_atomic(state_path, _default_file())
 
     return state_path
 
 
 # ============================================================================
-# 2. JSON STATE SCHEMA + DEFAULTS
+# 2. JSON SCHEMA + DEFAULTS
 # ============================================================================
+#
+# The shared file holds MULTIPLE independent "camps" (e.g. "Y8 2026",
+# "Y9 2026") in one JSON file, so different staff can work on different
+# camps without blocking each other's saves:
+#
+# {
+#   "camps": {
+#     "Y8 2026": {
+#       "version": 3, "last_modified": "...", "last_modified_by": "...",
+#       "groups":   { "Bay of Fires": ["S001", "S002"], ... },
+#       "students": { "S001": {name, friend_requests, form_data, medical_flags}, ... }
+#     },
+#     "Y9 2026": { ... }
+#   }
+# }
 
-def _default_state() -> dict:
+def _default_camp() -> dict:
     return {
-        "version": 1,                     # bumped on every successful save
+        "version": 1,                    # bumped on every successful save OF THIS CAMP
         "last_modified": _now_iso(),
         "last_modified_by": _current_user_label(),
-        "groups": {},                      # { "Bay of Fires": ["S001", "S002"], ... }
-        "students": {}                     # { "S001": {name, friend_requests, form_data, medical_flags}, ... }
+        "groups": {},
+        "students": {},
     }
+
+
+def _default_file() -> dict:
+    return {"camps": {DEFAULT_CAMP_NAME: _default_camp()}}
 
 
 def _now_iso() -> str:
@@ -168,6 +189,28 @@ def _current_user_label() -> str:
         return f"{getpass.getuser()} ({platform.node()})"
     except Exception:
         return "unknown"
+
+
+def _migrate_legacy_schema(raw: dict) -> dict:
+    """
+    Older versions of this app wrote a flat {version, groups, students, ...}
+    file with no "camps" wrapper. If we detect that shape, wrap it into a
+    single camp so nothing is lost, and mark it dirty so the caller
+    persists the migrated shape back to disk.
+    """
+    if "camps" in raw:
+        return raw
+    if "groups" in raw or "students" in raw:
+        migrated_camp = {
+            "version": raw.get("version", 1),
+            "last_modified": raw.get("last_modified", _now_iso()),
+            "last_modified_by": raw.get("last_modified_by", _current_user_label()),
+            "groups": raw.get("groups", {}),
+            "students": raw.get("students", {}),
+        }
+        return {"camps": {DEFAULT_CAMP_NAME: migrated_camp}}
+    # Genuinely empty/unrecognised file -- start fresh.
+    return _default_file()
 
 
 # ============================================================================
@@ -203,71 +246,126 @@ def _read_json_with_retry(path: Path, retries: int = 3, delay: float = 0.3) -> d
     )
 
 
+def _load_full_file(path: Path) -> dict:
+    """
+    Read the whole shared file, migrating legacy schema if needed.
+    If migration happened, the fixed-up shape is written straight back to
+    disk so every other client also sees the new "camps" structure.
+    """
+    raw = _read_json_with_retry(path)
+    migrated = _migrate_legacy_schema(raw)
+    if migrated is not raw:
+        _write_json_atomic(path, migrated)
+    return migrated
+
+
 # ============================================================================
-# 4. LOAD / SAVE WITH OPTIMISTIC LOCKING
+# 4. CAMP DISCOVERY / CREATION
+# ============================================================================
+
+def list_camp_names(path: Path) -> list[str]:
+    """Return the names of all camps currently in the shared file, sorted."""
+    full = _load_full_file(path)
+    return sorted(full["camps"].keys())
+
+
+def create_camp(path: Path, camp_name: str) -> None:
+    """Add a new, empty camp to the shared file (no-op if it already exists)."""
+    camp_name = camp_name.strip()
+    if not camp_name:
+        raise ValueError("Camp name can't be empty.")
+    full = _load_full_file(path)
+    if camp_name not in full["camps"]:
+        full["camps"][camp_name] = _default_camp()
+        _write_json_atomic(path, full)
+
+
+# ============================================================================
+# 5. LOAD / SAVE ONE CAMP, WITH PER-CAMP OPTIMISTIC LOCKING
 # ============================================================================
 
 class ConcurrencyError(Exception):
-    """Raised when a save is blocked because the file changed since it was loaded."""
+    """Raised when a save is blocked because this camp changed since it was loaded."""
     pass
 
 
-def load_state(path: Path) -> dict:
+def load_camp(path: Path, camp_name: str) -> dict:
     """
-    Load the current state from disk.
+    Load a single camp's data from the shared file.
     The returned dict includes '_loaded_version' and '_loaded_mtime' --
-    stash these (e.g. in st.session_state) and pass them back into save_state().
+    stash these (e.g. in st.session_state) and pass them back into save_camp().
     """
-    data = _read_json_with_retry(path)
-    data["_loaded_version"] = data.get("version", 1)
-    data["_loaded_mtime"] = path.stat().st_mtime
-    return data
+    full = _load_full_file(path)
+    if camp_name not in full["camps"]:
+        create_camp(path, camp_name)
+        full = _load_full_file(path)
+
+    camp = full["camps"][camp_name]
+    camp["_loaded_version"] = camp.get("version", 1)
+    camp["_loaded_mtime"] = path.stat().st_mtime
+    return camp
 
 
-def save_state(path: Path, new_state: dict, loaded_version: int, loaded_mtime: float) -> dict:
+def peek_camp_version(path: Path, camp_name: str) -> int | None:
     """
-    Attempt to save new_state to disk, guarded by optimistic locking.
+    Cheap check: read the file and return this camp's CURRENT version on disk,
+    without touching session state. Used to show a staleness banner
+    ("a newer version is available") without forcing a full reload.
+    Returns None if the camp doesn't exist (e.g. was never created, or
+    deleted by someone else).
+    """
+    full = _load_full_file(path)
+    camp = full["camps"].get(camp_name)
+    return camp.get("version") if camp else None
 
-    Two independent checks are used:
-      - version: the integer counter stored inside the JSON itself.
-      - mtime: the filesystem modification time at load time.
 
-    If either check indicates the file was changed by someone else since this
-    session loaded it, raise ConcurrencyError and DO NOT write -- the caller
-    (UI) should show an error telling the user to sync first.
+def save_camp(path: Path, camp_name: str, new_camp_data: dict,
+              loaded_version: int, loaded_mtime: float) -> dict:
+    """
+    Attempt to save one camp's data to disk, guarded by optimistic locking
+    scoped to THIS CAMP ONLY -- edits to other camps by other staff, made
+    since this camp was loaded, are preserved untouched.
+
+    Re-reads the full file fresh right before writing, so:
+      - the concurrency check is against the true current state, and
+      - any other camp's concurrent changes are carried forward rather
+        than overwritten by a stale in-memory copy.
     """
     if not path.exists():
         raise FileNotFoundError(f"State file missing at {path}")
 
-    current_on_disk = _read_json_with_retry(path)
-    current_version = current_on_disk.get("version", 1)
-    current_mtime = path.stat().st_mtime
+    full = _load_full_file(path)
+    current_camp = full["camps"].get(camp_name)
+    current_version = current_camp.get("version", 1) if current_camp else 0
 
-    if current_version != loaded_version or current_mtime > loaded_mtime + 0.5:
+    if current_camp is None or current_version != loaded_version:
         raise ConcurrencyError(
-            "The shared file has changed since you last loaded it. "
+            f"'{camp_name}' has changed since you last loaded it "
+            "(someone else saved, or it was renamed/removed). "
             "Click 'Sync Latest Changes' to pull the newest version, "
             "reapply your moves, and try saving again."
         )
 
     # Strip internal bookkeeping keys before persisting, bump version + metadata.
-    to_write = {k: v for k, v in new_state.items() if not k.startswith("_")}
-    to_write["version"] = current_version + 1
-    to_write["last_modified"] = _now_iso()
-    to_write["last_modified_by"] = _current_user_label()
+    to_write_camp = {k: v for k, v in new_camp_data.items() if not k.startswith("_")}
+    to_write_camp["version"] = current_version + 1
+    to_write_camp["last_modified"] = _now_iso()
+    to_write_camp["last_modified_by"] = _current_user_label()
 
-    _write_json_atomic(path, to_write)
+    full["camps"][camp_name] = to_write_camp
+    _write_json_atomic(path, full)
 
-    to_write["_loaded_version"] = to_write["version"]
-    to_write["_loaded_mtime"] = path.stat().st_mtime
-    return to_write
+    to_write_camp["_loaded_version"] = to_write_camp["version"]
+    to_write_camp["_loaded_mtime"] = path.stat().st_mtime
+    return to_write_camp
 
 
-def sync_latest(path: Path) -> dict:
+def sync_camp(path: Path, camp_name: str) -> dict:
     """
-    Explicit 'Sync Latest Changes' action: simply re-reads the file fresh.
+    Explicit 'Sync Latest Changes' action for the current camp: re-reads
+    the file fresh and refreshes loaded_version/mtime markers.
     (Actual Drive-to-local file sync is handled by the Google Drive for
-    Desktop client in the background -- this just re-reads what's currently
-    on disk and refreshes our loaded_version/mtime markers.)
+    Desktop client in the background -- this just re-reads what's
+    currently on disk.)
     """
-    return load_state(path)
+    return load_camp(path, camp_name)
